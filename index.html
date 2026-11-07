@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="icon" href="data:," />
+    <title>AI World · 智能体世界</title>
+    <style>
+      html, body { margin: 0; height: 100%; overflow: hidden; background: transparent; }
+      #avatar { display: block; width: 100vw; height: 100vh; background: #14161b; }
+      .hud {
+        position: fixed; left: 16px; top: 16px; z-index: 10;
+        display: flex; flex-direction: column; gap: 8px;
+        font: 13px/1.4 "Microsoft YaHei", system-ui, sans-serif; color: #e8eaf0;
+      }
+      .bar { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+      .bar button, .bar label {
+        background: rgba(24, 27, 34, .78); border: 1px solid rgba(255,255,255,.14);
+        color: #e8eaf0; padding: 6px 10px; border-radius: 8px; cursor: pointer;
+        backdrop-filter: blur(8px);
+      }
+      .bar button:hover { border-color: rgba(140, 190, 255, .6); }
+      .bar label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+      #status, #bridge {
+        background: rgba(24, 27, 34, .78); padding: 6px 10px; border-radius: 8px;
+        max-width: 70vw; color: #9fb4cc;
+      }
+      #bridge { max-width: 220px; color: #8fd0a8; }
+      #cmd-form { display: flex; gap: 6px; align-items: center; }
+      #cmd-input {
+        width: 300px; max-width: 56vw; background: rgba(24, 27, 34, .78);
+        border: 1px solid rgba(255,255,255,.14); color: #e8eaf0;
+        padding: 6px 10px; border-radius: 8px; outline: none;
+        font: 13px/1.4 "Microsoft YaHei", system-ui, sans-serif;
+      }
+      #cmd-input:focus { border-color: rgba(140, 190, 255, .6); }
+      #caption {
+        position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%);
+        max-width: 70vw; padding: 8px 14px; border-radius: 10px;
+        background: rgba(16, 18, 24, .72); color: #eef2f8; text-align: center;
+        font: 15px/1.5 "Microsoft YaHei", system-ui, sans-serif;
+        opacity: 0; transition: opacity .25s; pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="avatar"></canvas>
+
+    <div class="hud">
+      <div class="bar">
+        <button type="button" data-preset="desk">书桌视角</button>
+        <button type="button" data-preset="room">房间视角</button>
+        <button type="button" data-preset="portrait">肖像视角</button>
+        <label><input id="room-toggle" type="checkbox" checked /> 房间</label>
+        <label><input id="sit-toggle" type="checkbox" checked /> 坐姿</label>
+      </div>
+      <div class="bar">
+        <button type="button" data-action="sleep">上床睡觉</button>
+        <button type="button" data-action="wake">起床</button>
+        <button type="button" data-action="phone">玩手机</button>
+        <button type="button" data-action="computer">玩电脑</button>
+        <button type="button" data-action="window">看风景</button>
+        <button type="button" data-action="stretch">伸懒腰</button>
+        <button type="button" data-action="walk">走动</button>
+      </div>
+      <div class="bar">
+        <form id="cmd-form" autocomplete="off">
+          <input id="cmd-input" type="text"
+                 placeholder="说点什么：睡觉 / 起床 / 玩手机 / 玩电脑 / 看风景 / 伸懒腰 / 走动 / 坐下 / 站起（其他内容会当成消息发给她）" />
+          <button type="submit">发送</button>
+        </form>
+      </div>
+      <div id="status">加载中…</div>
+      <div id="bridge">智能体桥：未连接</div>
+    </div>
+    <div id="caption"></div>
+
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "./vendor/three.module.js",
+          "three/addons/": "./vendor/addons/",
+          "@pixiv/three-vrm": "./vendor/three-vrm.module.js"
+        }
+      }
+    </script>
+    <script type="module">
+      import * as THREE from "three";
+      import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+      import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
+      window.THREE = THREE;
+      window.GLTFLoader = GLTFLoader;
+      window.THREE_VRM = { VRMLoaderPlugin, VRMUtils };
+      window.__threeReady = true;
+      window.dispatchEvent(new Event("three-ready"));
+    </script>
+
+    <script src="frontend/vrm-renderer.js"></script>
+    <script src="frontend/world-bridge.js"></script>
+    <script src="world-layer.js"></script>
+    <script src="main.js"></script>
+  </body>
+</html>

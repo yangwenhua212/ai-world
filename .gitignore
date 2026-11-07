@@ -1,0 +1,10 @@
+# 测试截图（README 预览图在 docs/）
+shot-*.png
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 系统文件
+.DS_Store
+Thumbs.db
