@@ -95,6 +95,7 @@
       this._pendingSpeech = null; // 模型还没加载完时先排队，加载完再播
       this._blinkAt = 0;
       this._blinkStart = 0;
+      this._eyeClosed = 0;
       this._lastNow = 0;
       this._elapsed = 0;
       this._running = true;
@@ -368,6 +369,11 @@
       }
     }
 
+    /** 睡觉闭眼：0 = 正常随机眨眼，1 = 一直闭着。由世界层每帧驱动。 */
+    setEyeClosed(value) {
+      this._eyeClosed = Math.max(0, Math.min(1, Number(value) || 0));
+    }
+
     /* ---------------- 每帧动画 ---------------- */
 
     _idle() {
@@ -382,6 +388,12 @@
 
     _blink(nowMs) {
       if (!this._hasExpression("blink")) return;
+      // 睡觉时由世界层锁住闭眼，不做随机眨眼。
+      if (this._eyeClosed > 0.001) {
+        this._blinkStart = 0;
+        this._setExpressionValue("blink", this._eyeClosed);
+        return;
+      }
       if (this._blinkAt === 0) {
         this._blinkAt = nowMs + BLINK_INTERVAL[0] + Math.random() * (BLINK_INTERVAL[1] - BLINK_INTERVAL[0]);
       }

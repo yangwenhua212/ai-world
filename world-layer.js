@@ -28,11 +28,12 @@
   const SIT_OFFSET_Z = 0.09; // 坐姿时角色相对椅心的前移量
   const DESK_TOP = 0.75;
   const BED_FOOT = [1.17, 0.55]; // 躺下后脚所在的位置（床面上，床已向内移避开右墙）
+  const BED_SLEEP_Z = -0.10; // 躺下的横向位置：靠上床那一侧，床模型没加载完时兜底
   const BED_WALK = [2.04, -0.62]; // 上床前走到这里（床外侧走道，正对坐下的位置）
   const BED_SIT_HIP = [2.04, -0.30]; // 坐床沿时的髋部位置：屁股压住床垫边，脚垂在床外
   const BED_SIT_YAW = Math.PI; // 坐床沿时的朝向：背对床、面朝房间（脚落在床外地面）
   const BED_LEGS_YAW = -Math.PI / 2; // 在床沿转身后的朝向：身体顺着床的长边（头朝 +X）
-  const WINDOW_SPOT = [-2.21, -1.30]; // 看风景的站位：窗洞正前方，避开书桌左沿 -1.40
+  const WINDOW_SPOT = [-2.21, -2.08]; // 看风景的站位：窗洞正前方，抬手才够得到窗把手
   const WINDOW_YAW = Math.PI; // 面朝窗户（-Z）
   const WALK_SPEED = 0.80; // m/s
 
@@ -92,6 +93,11 @@
       this._msgReplied = false; // 是否已显示回复
       this._msgBlink = 0; // 提示闪烁相位
       this._lieT = 0; // 躺下权重
+      this._blanketT = 0; // 被子盖上来的进度
+      this._eyeT = 0; // 睡觉闭眼的权重
+      this._reachT = 0; // 伸手够窗把手的权重
+      this._reachAim = new this.THREE.Vector3(); // 手要落到的世界坐标
+      this._mouseMesh = null; // 桌面鼠标：玩电脑时右手放上去
       this._lieYFix = null; // 躺下后按包围盒修正的高度
       this._bedSitPos = null; // 坐床沿时的根节点位置（测量得出）
       this._bedSitFrom = null; // 坐下前的站位，用于"站位 ↔ 坐位"插值
@@ -309,10 +315,11 @@
         barB.position.y = -0.62;
         g.add(barB);
         const handle = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.16, 0.03), hMat);
-        handle.position.set(dir * 0.58, 0.02, 0.045);
+        // 把手压低到窗扇中下部：以她的身高，抬手能够到。
+        handle.position.set(dir * 0.58, -0.32, 0.045);
         g.add(handle);
         this.group.add(g);
-        return { g, open };
+        return { g, open, handle };
       };
       this._winSashes = [
         mk(-2.86, 1, -1.05),
@@ -458,8 +465,9 @@
       this._buildOfficeChair();
       // 床（靠右墙）。整体向内收 0.18m，否则床头会插进右墙（墙内表面 x=2.94）。
       this._place("bed_double_A", 2.0, "x", [1.92, 0, 0.55], -Math.PI / 2);
-      // 枕头要对准头的落点（躺下后头中心 z≈0.55），否则会枕在枕头边缘。
-      this._place("pillow_A", 0.5, "x", [2.37, 0.33, 0.50], -Math.PI / 2);
+      // 枕头正对头的落点（头 x≈2.5、z≈-0.1），否则头会悬在床边。
+      this._place("pillow_A", 0.5, "x", [2.50, 0.33, -0.07], -Math.PI / 2);
+      this._buildBlanket();
       // 靠墙矮柜。
       this._place("cabinet_medium_decorated", 1.35, "y", [2.16, 0, -2.20], 0);
       // 落地灯。
@@ -509,6 +517,7 @@
       mouse.scale.set(1, 0.48, 1.55);
       mouse.position.set(0.10, DESK_TOP + 0.026, -1.07);
       this.group.add(mouse);
+      this._mouseMesh = mouse;
       // 滚轮。
       this._box(0.012, 0.008, 0.02, this._mat(0x3a4150), 0.10, DESK_TOP + 0.045, -1.10);
 
@@ -931,6 +940,7 @@
       // 切到别的动作时把窗关好、头收回来，窗扇不会一直敞着。
       if (n !== "window") {
         this._lookOut = 0;
+        this._reachT = 0;
         if (this._winT) {
           this._winT = 0;
           this._setWindowOpen(0);
@@ -1073,11 +1083,76 @@
       this._phase = "";
     }
 
-    /** 每次上床给躺位一点随机：位置 ±5cm、朝向 ±3°，贴床不越界。 */
+    /**
+     * 每次上床给躺位一点随机。z 贴着"上床那一侧"的床沿，不再滑到双人床正中间：
+     * 从床边坐下的位置只往里挪半个身子，看起来是就地躺下而不是整条滑过去。
+     */
     _rollLieRoot() {
       const j = (a) => (Math.random() * 2 - 1) * a;
-      this._lieYaw = -Math.PI / 2 + j(0.05);
-      return { x: BED_FOOT[0] + j(0.05), z: BED_FOOT[1] + j(0.09) };
+      this._lieYaw = -Math.PI / 2 + j(0.04);
+      const zSide = this._bedBox ? this._bedBox.z0 + 0.35 : BED_SLEEP_Z;
+      return { x: BED_FOOT[0] + j(0.04), z: zSide + j(0.03) };
+    }
+
+    /** 床垫面高度：床模型没加载完时用兜底值。 */
+    _bedTop() {
+      return (this._bedBox && this._bedBox.top) || 0.355;
+    }
+
+    /** 被子：睡觉时从床脚一直拉到胸口，罩在躺着的身体上。 */
+    _buildBlanket() {
+      const THREE = this.THREE;
+      const w = 1.32; // 床脚 → 胸口（躺平后脚 x≈1.28、胸口 x≈2.20）
+      const d = 0.95; // 盖住她躺的这一侧，连身体侧面一起罩住
+      const H = 0.30; // 隆起高度：床垫面 0.335 + 0.30 ≈ 0.64，高于身体最高点 0.57
+      const clamp01 = (t) => Math.min(1, Math.max(0, t));
+      const smooth = (t) => t * t * (3 - 2 * t);
+      const geo = new THREE.PlaneGeometry(w, d, 30, 14);
+      geo.rotateX(-Math.PI / 2);
+      const pos = geo.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i) + w / 2; // 0 = 床脚端，w = 胸口端
+        const z = Math.abs(pos.getZ(i)); // 0 = 身体中线
+        // 脚端和胸口端平滑收边，中间保持满高：整条被子像盖在人身上。
+        const fx = smooth(clamp01(x / 0.16)) * (1 - smooth(clamp01((x - (w - 0.16)) / 0.16)));
+        // 侧边摊回床垫，顺手压住身体侧面，避免人从被面边缘露出来。
+        const fz = 0.2 + 0.8 * (1 - smooth(clamp01((z - 0.34) / 0.14)));
+        // 一点点布料的起伏，避免看着像一块平板。
+        const ripple = 0.01 * Math.sin(x * 17 + z * 13) * fx * fz;
+        pos.setY(i, 0.012 + H * fx * fz + ripple);
+      }
+      geo.computeVertexNormals();
+      // 支点挪到床脚那端：拉被子时从脚往身上铺，而不是整块平移。
+      geo.translate(w / 2, 0, 0);
+      const mesh = new THREE.Mesh(
+        geo,
+        new THREE.MeshStandardMaterial({
+          color: 0xdcb8c1,
+          roughness: 0.95,
+          metalness: 0,
+          side: THREE.DoubleSide,
+        })
+      );
+      mesh.position.set(1.02, this._bedTop(), BED_SLEEP_Z);
+      mesh.scale.x = 0.16;
+      mesh.visible = false;
+      this.group.add(mesh);
+      this._blanket = mesh;
+    }
+
+    /** 被子的拉/掀：睡觉时铺上来，起床时收回床脚。 */
+    _updateBlanket(dt) {
+      const asleep = this._action === "sleep" && this._phase === "sleep";
+      this._blanketT = ease(this._blanketT || 0, asleep ? 1 : 0, asleep ? 1.3 : 2.0, dt);
+      const b = this._blanket;
+      if (!b) return;
+      const t = this._blanketT;
+      b.visible = t > 0.01;
+      if (!b.visible) return;
+      b.scale.x = 0.16 + 0.84 * t;
+      // 刚拉起来时前缘略离床，铺好后落回被面。
+      b.position.y = this._bedTop() - 0.02 + 0.05 * (1 - t);
+      if (this._lieRoot) b.position.z = this._lieRoot.z;
     }
 
     /** 躺下姿态的四元数：先绕 Y 转到朝床尾，再仰面放平。 */
@@ -1412,13 +1487,22 @@
         let d = WINDOW_YAW - (this._rootYaw || 0);
         d = Math.atan2(Math.sin(d), Math.cos(d));
         if (Math.abs(d) < 0.04) {
+          this._phase = "w-reach";
+          this._actionT = 0;
+        }
+        return;
+      }
+      if (p === "w-reach") {
+        // 先抬手摸到窗把手，够到了才推窗。
+        this._reachT = ease(this._reachT || 0, 1, 5, dt);
+        if (this._reachT > 0.93) {
           this._phase = "w-open";
           this._actionT = 0;
         }
         return;
       }
       if (p === "w-open") {
-        // 两扇窗往里推开。
+        // 手扶着把手，两扇窗往里推开。
         this._winT = Math.min(1, this._winT + dt / 1.1);
         const s = this._winT * this._winT * (3 - 2 * this._winT);
         this._setWindowOpen(s);
@@ -1429,8 +1513,9 @@
         return;
       }
       if (p === "w-look") {
-        // 抬头看窗外：夜景 / 城市的灯。
+        // 抬头看窗外：夜景 / 城市的灯；手先收回来。
         this._lookOut = ease(this._lookOut, 1, 2, dt);
+        if (this._actionT > 0.7) this._reachT = ease(this._reachT || 0, 0, 3, dt);
         if (this._actionT > 5) {
           this._phase = "w-close";
           this._actionT = 0;
@@ -1439,10 +1524,23 @@
       }
       if (p === "w-close") {
         this._lookOut = ease(this._lookOut, 0, 2.5, dt);
-        this._winT = Math.max(0, this._winT - dt / 1.0);
+        // 再抬手扶住把手，够到了才开始关。
+        this._reachT = ease(this._reachT || 0, 1, 4, dt);
+        if (this._reachT > 0.85) {
+          this._winT = Math.max(0, this._winT - dt / 1.0);
+        }
         const s = this._winT * this._winT * (3 - 2 * this._winT);
         this._setWindowOpen(s);
-        if (this._winT <= 0 && this._actionT > 0.4) {
+        if (this._winT <= 0 && this._reachT > 0.85) {
+          this._phase = "w-retract";
+          this._actionT = 0;
+        }
+        return;
+      }
+      if (p === "w-retract") {
+        this._reachT = ease(this._reachT || 0, 0, 4, dt);
+        if (this._reachT < 0.08) {
+          this._reachT = 0;
           this._phase = "w-back";
           this._enterWalk(AVATAR_POS[0], AVATAR_POS[2]);
         }
@@ -1755,8 +1853,8 @@
           const hl = this._hipLocal;
           const lieAt = this._lieRoot || { x: BED_FOOT[0], z: BED_FOOT[1] };
           if (hl) {
-            // 以髋部为轴放平：髋部从床沿滑到床中间，身体绕着它后仰，
-            // 不会出现"整块身体悬在半空转"的效果。
+            // 以髋部为轴放平：髋部从床沿只往里挪半个身子，身体绕着它后仰，
+            // 不会出现"整块身体悬在半空转"或"整条滑到床正中"的效果。
             const hipOff = new THREE.Vector3(hl.x, hl.y, hl.z);
             const top = (this._bedBox && this._bedBox.top) || 0.355;
             const hip0 = new THREE.Vector3(BED_SIT_HIP[0], top + 0.05, BED_SIT_HIP[1]);
@@ -1808,6 +1906,66 @@
       if (this.renderer) this.renderer._baseRotationY = a * e;
 
       this._groundFeet();
+    }
+
+    /**
+     * 右手 IK（CCD）：把右手拉到世界坐标 target，权重 weight 混回动作本身的手臂姿态。
+     * 只给"手要真的落在某个东西上"的动作用（鼠标 / 窗把手），权重 0 时完全不干预。
+     */
+    _reachArm(target, weight) {
+      const h = this._avatar && this._avatar.humanoid;
+      if (!h || !(weight > 0.01)) return;
+      const THREE = this.THREE;
+      const up = h.getNormalizedBoneNode("rightUpperArm");
+      const lo = h.getNormalizedBoneNode("rightLowerArm");
+      const hand = h.getNormalizedBoneNode("rightHand");
+      if (!up || !lo || !hand) return;
+      const up0 = up.quaternion.clone();
+      const lo0 = lo.quaternion.clone();
+      const scene = this._avatar.scene;
+      const bonePos = new THREE.Vector3();
+      const handPos = new THREE.Vector3();
+      const want = new THREE.Vector3();
+      const q = new THREE.Quaternion();
+      const pq = new THREE.Quaternion();
+      for (let it = 0; it < 6; it++) {
+        for (let i = 0; i < 2; i++) {
+          const bone = i === 0 ? up : lo;
+          scene.updateMatrixWorld(true);
+          bone.getWorldPosition(bonePos);
+          want.copy(target).sub(bonePos);
+          if (want.lengthSq() < 1e-8) continue;
+          want.normalize();
+          hand.getWorldPosition(handPos);
+          handPos.sub(bonePos).normalize();
+          if (handPos.lengthSq() < 1e-8) continue;
+          // 把"当前手方向 → 目标方向"这个世界旋转换成骨骼的局部旋转。
+          q.setFromUnitVectors(handPos, want);
+          bone.parent.getWorldQuaternion(pq);
+          bone.quaternion.premultiply(pq.clone().invert().multiply(q).multiply(pq));
+        }
+      }
+      const solvedUp = up.quaternion.clone();
+      const solvedLo = lo.quaternion.clone();
+      up.quaternion.copy(up0).slerp(solvedUp, weight);
+      lo.quaternion.copy(lo0).slerp(solvedLo, weight);
+    }
+
+    /** 每帧在姿态算完之后做手臂 IK：打字时右手在鼠标上，开窗时右手在把手上。 */
+    _updateReach() {
+      const type = this._typeT || 0;
+      const reach = this._reachT || 0;
+      const sash = this._winSashes && this._winSashes[1];
+      if (type <= 0.02 && (reach <= 0.02 || !sash || !sash.handle)) return;
+      this.group.updateMatrixWorld(true); // 窗扇刚转过，把手的世界坐标要重新算
+      if (type > 0.02 && this._mouseMesh) {
+        this._mouseMesh.getWorldPosition(this._reachAim);
+        this._reachAim.y += 0.045;
+        this._reachArm(this._reachAim, type);
+        return;
+      }
+      sash.handle.getWorldPosition(this._reachAim);
+      this._reachArm(this._reachAim, reach);
     }
 
     /** 手臂：坐姿搭腿 / 伸懒腰 / 玩手机 / 走路摆臂，都叠加在放松姿态上。 */
@@ -1891,15 +2049,14 @@
         ],
         [[Z, -2.65 * stretch]]
       );
-      // 打字时左右手交替敲的细小起伏。
-      const tapR = Math.sin(this._time * 11) * 0.07 * type;
+      // 打字时左手交替敲键的细小起伏（右手在鼠标上，由 IK 接管）。
       const tapL = Math.sin(this._time * 11 + 2.1) * 0.07 * type;
       // 躺下时手臂贴在身体两侧、手肘微屈（不会举到半空）。
       set(
         "rightLowerArm",
         [],
         [
-          [Y, 1.61 * type + tapR],
+          [Y, 1.61 * type],
           [Y, 0.07 * grab],
           [Y, 1.10 * phone],
           [X, 0.55 * phone],
@@ -2156,6 +2313,14 @@
     update(dt) {
       this._time += dt;
       this._updatePose(dt);
+      this._updateReach();
+      this._updateBlanket(dt);
+      // 睡着时闭眼，醒来慢慢睁开；闭眼期间不再做随机眨眼。
+      const asleep = this._action === "sleep" && this._phase === "sleep";
+      this._eyeT = ease(this._eyeT || 0, asleep ? 1 : 0, 1.8, dt);
+      if (this.renderer && typeof this.renderer.setEyeClosed === "function") {
+        this.renderer.setEyeClosed(this._eyeT);
+      }
       if (this._preset === "portrait") this._followPortrait();
       const k = 1 - Math.pow(0.0025, Math.min(dt, 0.05));
       this.camera.position.lerp(this._targetPos, k);
