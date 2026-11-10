@@ -36,6 +36,7 @@
   const WINDOW_SPOT = [-2.21, -2.08]; // 看风景的站位：窗洞正前方，抬手才够得到窗把手
   const WINDOW_YAW = Math.PI; // 面朝窗户（-Z）
   const WALK_SPEED = 0.80; // m/s
+  const RM_PALM = 0.055; // 手腕到掌心的距离：IK 求的是掌心落点，不是手腕
 
   /** 一阶平滑：cur 向 target 按 speed 收敛，与帧率无关。 */
   function ease(cur, target, speed, dt) {
@@ -318,8 +319,8 @@
         barB.position.y = -0.62;
         g.add(barB);
         const handle = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.16, 0.03), hMat);
-        // 把手压低到窗扇中下部：以她的身高，抬手能够到。
-        handle.position.set(dir * 0.58, -0.32, 0.045);
+        // 把手压到窗扇中下部：站在窗前抬手能自然扶到（约 1.2m 高），肘部还能弯着。
+        handle.position.set(dir * 0.58, -0.52, 0.045);
         g.add(handle);
         this.group.add(g);
         return { g, open, handle };
@@ -513,17 +514,17 @@
       mug.position.set(-0.74, DESK_TOP + 0.05, -1.16);
       this.group.add(mug);
 
-      // 鼠标垫 + 鼠标（键盘右侧）。
+      // 鼠标垫 + 鼠标（键盘右侧，靠近她一侧，坐着才够得到）。
       const padMat = this._mat(0x2b3550, { roughness: 1 });
-      this._box(0.22, 0.006, 0.18, padMat, 0.10, DESK_TOP + 0.004, -1.07);
+      this._box(0.22, 0.006, 0.18, padMat, 0.05, DESK_TOP + 0.004, -1.09);
       const mouseMat = this._mat(0xe6eaf2, { roughness: 0.55 });
       const mouse = new THREE.Mesh(new THREE.SphereGeometry(0.042, 16, 12), mouseMat);
       mouse.scale.set(1, 0.48, 1.55);
-      mouse.position.set(0.10, DESK_TOP + 0.026, -1.07);
+      mouse.position.set(0.05, DESK_TOP + 0.026, -1.09);
       this.group.add(mouse);
       this._mouseMesh = mouse;
       // 滚轮。
-      this._box(0.012, 0.008, 0.02, this._mat(0x3a4150), 0.10, DESK_TOP + 0.045, -1.10);
+      this._box(0.012, 0.008, 0.02, this._mat(0x3a4150), 0.05, DESK_TOP + 0.045, -1.12);
 
       // 桌面手机（平放，屏幕朝上）。放在鼠标左后方，坐着伸手刚好能拿到。
       const phoneMat = this._mat(0x1c1f26, { roughness: 0.5, metalness: 0.2 });
@@ -2093,63 +2094,111 @@
     }
 
     /**
-     * 右手 IK（CCD）：把右手拉到世界坐标 target，权重 weight 混回动作本身的手臂姿态。
+     * 手臂 IK（CCD）：把 right/left 手的掌心拉到世界坐标 target，权重 weight 混回动作本身。
+     * 大臂/小臂/手三段一起解，最后把肘部压到下方（避免手臂翻成"鸡翅"）。
      * 只给"手要真的落在某个东西上"的动作用（鼠标 / 窗把手），权重 0 时完全不干预。
      */
-    _reachArm(target, weight) {
+    _reachArm(side, target, weight) {
       const h = this._avatar && this._avatar.humanoid;
       if (!h || !(weight > 0.01)) return;
       const THREE = this.THREE;
-      const up = h.getNormalizedBoneNode("rightUpperArm");
-      const lo = h.getNormalizedBoneNode("rightLowerArm");
-      const hand = h.getNormalizedBoneNode("rightHand");
+      const pre = side === "left" ? "left" : "right";
+      const up = h.getNormalizedBoneNode(pre + "UpperArm");
+      const lo = h.getNormalizedBoneNode(pre + "LowerArm");
+      const hand = h.getNormalizedBoneNode(pre + "Hand");
       if (!up || !lo || !hand) return;
-      const up0 = up.quaternion.clone();
-      const lo0 = lo.quaternion.clone();
+      const chain = [up, lo, hand];
+      const base = chain.map((b) => b.quaternion.clone());
       const scene = this._avatar.scene;
       const bonePos = new THREE.Vector3();
-      const handPos = new THREE.Vector3();
+      const wrist = new THREE.Vector3();
+      const palm = new THREE.Vector3();
+      const dir = new THREE.Vector3();
       const want = new THREE.Vector3();
+      const cur = new THREE.Vector3();
       const q = new THREE.Quaternion();
       const pq = new THREE.Quaternion();
-      for (let it = 0; it < 6; it++) {
-        for (let i = 0; i < 2; i++) {
-          const bone = i === 0 ? up : lo;
-          scene.updateMatrixWorld(true);
-          bone.getWorldPosition(bonePos);
-          want.copy(target).sub(bonePos);
-          if (want.lengthSq() < 1e-8) continue;
-          want.normalize();
-          hand.getWorldPosition(handPos);
-          handPos.sub(bonePos).normalize();
-          if (handPos.lengthSq() < 1e-8) continue;
-          // 把"当前手方向 → 目标方向"这个世界旋转换成骨骼的局部旋转。
-          q.setFromUnitVectors(handPos, want);
-          bone.parent.getWorldQuaternion(pq);
-          bone.quaternion.premultiply(pq.clone().invert().multiply(q).multiply(pq));
+
+      // 掌心点 = 手腕沿手指方向前移 RM_PALM；骨骼局部 +Y 就是手指方向。
+      const palmPoint = () => {
+        hand.getWorldPosition(wrist);
+        dir.set(0, 1, 0).applyQuaternion(hand.getWorldQuaternion(q));
+        palm.copy(wrist).addScaledVector(dir, RM_PALM);
+      };
+      const solveBone = (bone) => {
+        scene.updateMatrixWorld(true);
+        bone.getWorldPosition(bonePos);
+        palmPoint();
+        want.copy(target).sub(bonePos);
+        cur.copy(palm).sub(bonePos);
+        if (want.lengthSq() < 1e-8 || cur.lengthSq() < 1e-8) return;
+        q.setFromUnitVectors(cur.normalize(), want.normalize());
+        bone.parent.getWorldQuaternion(pq);
+        bone.quaternion.premultiply(pq.clone().invert().multiply(q).multiply(pq));
+      };
+
+      for (let it = 0; it < 8; it++) {
+        for (let i = 0; i < chain.length; i++) solveBone(chain[i]);
+      }
+
+      // 肘部朝下：绕"肩→腕"轴把肘转到最低点，手臂看起来才自然。
+      scene.updateMatrixWorld(true);
+      const shoulder = up.getWorldPosition(new THREE.Vector3());
+      const wristPos = hand.getWorldPosition(new THREE.Vector3());
+      const elbow = lo.getWorldPosition(new THREE.Vector3());
+      const axis = wristPos.clone().sub(shoulder);
+      if (axis.lengthSq() > 1e-6) {
+        axis.normalize();
+        const rad = elbow.clone().sub(shoulder);
+        rad.addScaledVector(axis, -rad.dot(axis));
+        const out = side === "left" ? -0.30 : 0.30;
+        const down = new THREE.Vector3(out, -1, 0.12);
+        down.addScaledVector(axis, -down.dot(axis));
+        if (rad.lengthSq() > 1e-6 && down.lengthSq() > 1e-6) {
+          rad.normalize();
+          down.normalize();
+          const ang = Math.acos(Math.max(-1, Math.min(1, rad.dot(down))));
+          const sign = new THREE.Vector3().crossVectors(rad, down).dot(axis) >= 0 ? 1 : -1;
+          const rot = new THREE.Quaternion().setFromAxisAngle(axis, ang * sign);
+          up.parent.getWorldQuaternion(pq);
+          up.quaternion.premultiply(pq.clone().invert().multiply(rot).multiply(pq));
         }
       }
-      const solvedUp = up.quaternion.clone();
-      const solvedLo = lo.quaternion.clone();
-      up.quaternion.copy(up0).slerp(solvedUp, weight);
-      lo.quaternion.copy(lo0).slerp(solvedLo, weight);
+
+      // 转肘会把掌心带走一点，最后只解小臂 + 手，把掌心收回来。
+      for (let it = 0; it < 4; it++) {
+        solveBone(lo);
+        solveBone(hand);
+      }
+
+      const solved = chain.map((b) => b.quaternion.clone());
+      chain.forEach((b, i) => b.quaternion.copy(base[i]).slerp(solved[i], weight));
     }
 
-    /** 每帧在姿态算完之后做手臂 IK：打字时右手在鼠标上，开窗时右手在把手上。 */
+    /** 每帧在姿态算完之后做手臂 IK：打字时右手在鼠标上，开窗时双手在窗扇上。 */
     _updateReach() {
       const type = this._typeT || 0;
       const reach = this._reachT || 0;
       const sash = this._winSashes && this._winSashes[1];
-      if (type <= 0.02 && (reach <= 0.02 || !sash || !sash.handle)) return;
+      const hasSash = !!(sash && sash.handle);
+      if (type <= 0.02 && (reach <= 0.02 || !hasSash)) return;
       this.group.updateMatrixWorld(true); // 窗扇刚转过，把手的世界坐标要重新算
       if (type > 0.02 && this._mouseMesh) {
+        // 掌心落在鼠标顶面，手腕自然抬高一点。
         this._mouseMesh.getWorldPosition(this._reachAim);
-        this._reachAim.y += 0.045;
-        this._reachArm(this._reachAim, type);
+        this._reachAim.y += 0.035;
+        this._reachArm("right", this._reachAim, type);
         return;
       }
+      if (!hasSash) return;
+      // 右手扶把手，左手扶同一扇窗的外侧竖框：两只手一起推窗。
       sash.handle.getWorldPosition(this._reachAim);
-      this._reachArm(this._reachAim, reach);
+      this._reachArm("right", this._reachAim, reach);
+      this._winLeftTarget = this._winLeftTarget || new this.THREE.Vector3();
+      // 左手落在窗扇外侧竖框的下部（更靠她左手一侧，不会横穿身体）。
+      this._winLeftTarget.set(-0.64, -0.60, 0.04);
+      sash.g.localToWorld(this._winLeftTarget);
+      this._reachArm("left", this._winLeftTarget, reach);
     }
 
     /** 手臂：坐姿搭腿 / 伸懒腰 / 玩手机 / 走路摆臂，都叠加在放松姿态上。 */
