@@ -8,3 +8,7 @@ __pycache__/
 # 系统文件
 .DS_Store
 Thumbs.db
+
+# 桌面版依赖与产物
+node_modules/
+dist/

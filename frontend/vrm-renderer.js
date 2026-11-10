@@ -11,7 +11,7 @@
  *   setExpression(index, name)     情绪预设（happy/angry/sad/relaxed/surprised）
  *   setCameraPreset(name)          交给场景层：desk | room | portrait
  *   setRoomVisible(visible)        开/关房间（桌宠形态）
- *   setSitting(on)                 坐/站（房间层负责过渡动画）
+ *   setSitting(on)                 坐/站（世界层负责过渡动画）
  *   dispose()
  */
 (function (global) {
@@ -64,10 +64,9 @@
       if (!global.GLTFLoader) throw new Error("GLTFLoader 未加载");
 
       this.canvas = canvas;
-      this._THREE = THREE;
       this.type = "AiWorld";
 
-      // 场景与相机：相机初始值会被房间层的预设立即覆盖。
+      // 场景与相机：相机初始值会被世界层的预设立即覆盖。
       this._scene = new THREE.Scene();
       this._camera = new THREE.PerspectiveCamera(30, 1, 0.01, 100);
       this._camera.position.set(0, 1.5, 3);
@@ -110,19 +109,19 @@
       this._scene.add(this._fallbackLights);
       this._applyLightMode(true); // 默认房间开启，只补一点点光
 
-      // 房间层（可选）：与角色共用场景、相机和渲染循环。
+      // 世界层（可选）：与角色共用场景、相机和渲染循环。
       if (typeof global.WorldLayer === "function") {
         try {
           this._world = new global.WorldLayer({
             THREE: THREE,
             scene: this._scene,
             camera: this._camera,
-            renderer: this, // 房间层需要写 _baseY / _baseRotationY
+            renderer: this, // 世界层需要写 _baseY / _baseRotationY
             gltfLoader: global.GLTFLoader,
             canvas: canvas,
           });
         } catch (err) {
-          console.warn("[renderer] 房间层挂载失败：", err);
+          console.warn("[renderer] 世界层挂载失败：", err);
           this._world = null;
         }
       }
@@ -374,9 +373,9 @@
     _idle() {
       const root = this._vrm && this._vrm.scene;
       if (!root) return;
-      // 房间层在走路/躺下时会直接接管根节点，此时不能再叠加待机动作。
+      // 世界层在走路/躺下时会直接接管根节点，此时不能再叠加待机动作。
       if (this._world && this._world._drivesRoot) return;
-      // 轻微摆头 + 呼吸；房间层会在此基础上写自己的基础位置。
+      // 轻微摆头 + 呼吸；世界层会在此基础上写自己的基础位置。
       root.rotation.y = this._baseRotationY + Math.sin(this._elapsed * 0.6) * 0.05;
       root.position.y = this._baseY + Math.sin(this._elapsed * 1.2) * 0.01;
     }
@@ -430,7 +429,7 @@
         try {
           this._world.update(dt);
         } catch (_e) {
-          /* 房间层异常不中断渲染 */
+          /* 世界层异常不中断渲染 */
         }
       }
 

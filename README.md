@@ -27,6 +27,26 @@ python -m http.server 8080
 
 > 必须通过 HTTP 访问，直接双击 `index.html`（`file://`）会因为 ES Module 和模型加载的跨域限制而失败。
 
+### 桌面版（Windows exe）
+
+```bash
+npm install
+npm run build      # 产物：dist/AIWorld-0.1.0.exe，便携版，双击即用
+```
+
+开发时可以直接 `npm start` 以桌面窗口调试。
+
+桌面版会在 127.0.0.1 上起一个随机端口的本地静态服务（不占用 8080），并多一个**桌宠模式**：取消勾选「房间」或按 `Ctrl+P`，窗口变成透明、无边框、置顶，只有角色贴在桌面上；`Esc` 回到普通窗口。菜单「视图」里还有机位快捷键和开发者工具。
+
+可选的后台智能体示例（让角色真的"听得懂"你说的话）：
+
+```bash
+pip install websockets
+python -u tools/agent_demo.py
+```
+
+不配置模型时用关键词规则回复，开箱即用；想接自己的模型，设置 `AI_WORLD_LLM_URL` / `AI_WORLD_LLM_KEY` / `AI_WORLD_LLM_MODEL` 即可（OpenAI 兼容接口）。
+
 可选的语音桥（让智能体把 TTS 音频送进页面并驱动口型）：
 
 ```bash
@@ -34,9 +54,14 @@ pip install websockets
 python -u tools/world_voice.py --demo
 ```
 
+> `agent_demo.py` 与 `world_voice.py` 都用 8777 端口，二选一启动。
+
 ## 交互
 
-页面左上角是 HUD，也可以直接在输入框里说一句话驱动她：
+页面左上角是 HUD，这就是唯一的操作台：可以直接打字，也可以点「说话」用麦克风说一句（Edge / Chrome 自带的语音识别，中文）。
+
+- **动作指令**：本地立即执行，不需要任何后端。
+- **其他文本**：接入后台智能体时发给它，由它决定「拿手机回复」还是「去电脑干活」；没接入时本地兜底成一条消息。
 
 | 说法（示例） | 行为 |
 | --- | --- |
@@ -71,6 +96,20 @@ python -u tools/world_voice.py --demo
 
 `mode` 可选 `auto`（默认，按内容判断）/ `chat`（拿手机看并回复）/ `task`（直接去电脑）。
 
+页面也会把用户输入推给智能体，形成完整闭环：
+
+```jsonc
+{ "type": "hello", "role": "world" }              // 连接建立
+{ "type": "user", "text": "今天过得怎么样" }        // HUD 打字 / 语音识别的结果
+{ "type": "reply", "text": "挺好的呀" }            // 角色说出的回复
+{ "type": "speech-end", "interrupted": false }     // 一段语音播完 / 被打断
+```
+
+### 后台智能体（无界面）
+
+智能体不必有界面，跑成一个后台 WebSocket 服务端即可。参考 [tools/agent_demo.py](tools/agent_demo.py)：
+收到 `user` → 生成回复 → 回推 `action` 或 `message`，你在 3D 房间里只看到角色在动。
+
 ### postMessage（Electron / Tauri / iframe）
 
 ```js
@@ -99,7 +138,10 @@ world/
 │  ├─ vrm-renderer.js       VRM 渲染核心：渲染循环、口型、表情、眨眼
 │  └─ world-bridge.js       智能体桥：WebSocket + postMessage
 ├─ tools/
+│  ├─ agent_demo.py         后台智能体示例（收到 user 回 message / action）
 │  └─ world_voice.py        Python 端语音桥（可选）
+├─ electron/                桌面版：主进程 + 预加载脚本
+├─ package.json             Electron / electron-builder 配置
 ├─ vendor/                  three.js / @pixiv/three-vrm（MIT，自托管）
 ├─ assets/furniture/        KayKit Furniture Bits（CC0）
 ├─ models/avatar.vrm        VRM 示例形象

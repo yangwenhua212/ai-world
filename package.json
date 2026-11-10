@@ -1,0 +1,37 @@
+{
+  "name": "ai-world",
+  "version": "0.1.0",
+  "description": "AI World — 可被任意智能体驱动的 3D 房间桌宠",
+  "private": true,
+  "license": "GPL-3.0",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.aiworld.app",
+    "productName": "AI World",
+    "directories": { "output": "dist" },
+    "files": [
+      "electron/**/*",
+      "index.html",
+      "main.js",
+      "world-layer.js",
+      "frontend/**/*",
+      "vendor/**/*",
+      "assets/**/*",
+      "models/**/*"
+    ],
+    "win": {
+      "target": ["portable"]
+    },
+    "portable": {
+      "artifactName": "AIWorld-${version}.exe"
+    }
+  }
+}

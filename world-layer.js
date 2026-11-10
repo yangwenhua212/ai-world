@@ -36,6 +36,11 @@
   const WINDOW_YAW = Math.PI; // 面朝窗户（-Z）
   const WALK_SPEED = 0.80; // m/s
 
+  /** 一阶平滑：cur 向 target 按 speed 收敛，与帧率无关。 */
+  function ease(cur, target, speed, dt) {
+    return cur + (target - cur) * Math.min(1, dt * speed);
+  }
+
   class WorldLayer {
     constructor(opts) {
       this.THREE = opts.THREE;
@@ -95,8 +100,7 @@
       this._bedSitLeg = 0; // 床沿坐姿的抬腿量（床矮，脚要落回地面）
       this._legT = 0; // 收脚/放脚进度
       this._hipLocal = null; // 髋骨相对根节点的偏移（以髋部为轴放平用）
-      this._drivesRoot = false; // 由房间层接管根节点（走路/躺下时）
-      this._bedTop = null;
+      this._drivesRoot = false; // 由世界层接管根节点（走路/躺下时）
       this._lieRoot = null; // 躺下时根节点位置（每次上床随机一点点）
       this._lieYaw = -Math.PI / 2; // 躺下时的最终朝向（可小幅随机）
 
@@ -269,7 +273,6 @@
       const plane = new THREE.Mesh(new THREE.PlaneGeometry(8, 4), mat);
       plane.position.set(-2.21, 2.0, -4.2);
       this.group.add(plane);
-      this._outside = plane;
 
       // 窗外透进来的冷光，夜里有一点月光的层次。
       const glow = new THREE.PointLight(0x9fc4ff, night ? 0.55 : 0.3, 4.5, 2);
@@ -421,7 +424,6 @@
               new THREE.Vector3(0, -1, 0)
             );
             const hit = ray.intersectObject(obj, true)[0];
-            this._bedObj = obj;
             this._bedBox = {
               x0: pos[0] + box.min.x,
               x1: pos[0] + box.max.x,
@@ -443,7 +445,7 @@
           this.group.add(obj);
         },
         undefined,
-        (err) => console.warn("[room] load failed:", name, err)
+        (err) => console.warn("[world] load failed:", name, err)
       );
     }
 
@@ -642,7 +644,6 @@
       }
 
       this._avatar = vrm;
-      this._avatarScale = scale;
       this._captureBasePose(vrm);
       this._captureFingerPose(vrm);
       this._applyRelaxedArms();
@@ -964,13 +965,7 @@
         if (this._action === "sleep" && this._lieT > 0.02) return true;
         this._action = "sleep";
         this._sitting = false;
-        this._lieYFix = null;
-        this._bedSitPos = null;
-        this._bedSitFrom = null;
-        this._bedFold = null;
-        this._bedShin = null;
-        this._bedSitLeg = 0;
-        this._legT = 0;
+        this._clearLieState();
         this._lieRoot = this._rollLieRoot();
         if (this._poseT > 0.05) {
           this._phase = "stand-up";
@@ -1046,12 +1041,7 @@
       this._afterWalk = null;
       // 强制收掉躺姿，否则切回坐/站时身体还带着躺下的旋转和高度补偿。
       this._lieT = 0;
-      this._lieYFix = null;
-      this._bedSitPos = null;
-      this._bedSitFrom = null;
-      this._bedFold = null;
-      this._bedShin = null;
-      this._bedSitLeg = 0;
+      this._clearLieState();
       this._lieRoot = null;
       // 手机 / 消息状态收干净：手机回到桌上，提示点熄灭。
       if (this._phoneHeld) this._transferPhone(false);
@@ -1062,6 +1052,25 @@
       if (this._deskScreen) this._drawPhoneHome(this._deskScreen);
       if (this._handScreen) this._drawPhoneHome(this._handScreen);
       this._action = this._sitting ? "sit" : "stand";
+    }
+
+    /** 清掉躺姿 / 坐床沿的临时几何状态，避免带着上一轮的旋转和高度补偿。 */
+    _clearLieState() {
+      this._lieYFix = null;
+      this._bedSitPos = null;
+      this._bedSitFrom = null;
+      this._bedFold = null;
+      this._bedShin = null;
+      this._bedSitLeg = 0;
+      this._legT = 0;
+    }
+
+    /** 动作收尾：回到书桌前的坐姿，交回坐/站姿态。 */
+    _backToSit() {
+      this._drivesRoot = false;
+      this._sitting = true;
+      this._action = "sit";
+      this._phase = "";
     }
 
     /** 每次上床给躺位一点随机：位置 ±5cm、朝向 ±3°，贴床不越界。 */
@@ -1135,8 +1144,6 @@
     /** 行为状态机：睡觉的起床/走路/躺下，玩手机和伸懒腰的权重。 */
     _updateAction(dt) {
       const a = this._action;
-      const ease = (cur, target, speed) =>
-        cur + (target - cur) * Math.min(1, dt * speed);
 
       this._actionT += dt;
 
@@ -1166,16 +1173,17 @@
         }
       }
 
-      if (a !== "phone" && a !== "message") this._phoneT = ease(this._phoneT, 0, 3);
+      if (a !== "phone" && a !== "message") this._phoneT = ease(this._phoneT, 0, 3, dt);
       // 打字权重和电脑屏幕亮度：离开电脑动作就平滑收回，
       // 否则从"玩电脑"切到手机/窗边时手臂还保持着打字姿势。
       if (a !== "computer") {
-        this._typeT = ease(this._typeT || 0, 0, 3);
+        this._typeT = ease(this._typeT || 0, 0, 3, dt);
         if (this._screenMat && this._screenBase != null) {
           this._screenMat.emissiveIntensity = ease(
             this._screenMat.emissiveIntensity,
             this._screenBase,
-            3
+            3,
+            dt
           );
         }
       }
@@ -1196,17 +1204,17 @@
 
       if (a === "stretch") {
         if (this._phase === "up") {
-          this._stretchT = ease(this._stretchT, 1, 2.2);
+          this._stretchT = ease(this._stretchT, 1, 2.2, dt);
           if (this._actionT > 2.4) {
             this._phase = "down";
             this._actionT = 0;
           }
         } else {
-          this._stretchT = ease(this._stretchT, 0, 2.2);
+          this._stretchT = ease(this._stretchT, 0, 2.2, dt);
           if (this._actionT > 1.8) this.stopAction();
         }
       } else {
-        this._stretchT = ease(this._stretchT, 0, 3);
+        this._stretchT = ease(this._stretchT, 0, 3, dt);
       }
 
       if (a === "walk") {
@@ -1367,16 +1375,13 @@
         }
         if (this._moveWalk(dt)) {
           this._bedSitPos = null;
-          this._drivesRoot = false;
           this._walkAmp = 0;
           const next = this._afterWalk;
           this._afterWalk = null;
           if (next) {
             this.startAction(next);
           } else {
-            this._sitting = true;
-            this._action = "sit";
-            this._phase = "";
+            this._backToSit();
           }
         }
       }
@@ -1384,7 +1389,6 @@
 
     /** 走到窗边 → 开窗 → 看外面的风景 → 关窗 → 走回书桌。 */
     _updateWindow(dt) {
-      const ease = (cur, target, speed) => cur + (target - cur) * Math.min(1, dt * speed);
       const p = this._phase;
       if (p === "w-open-stand") {
         this._walkAmp = 0;
@@ -1426,7 +1430,7 @@
       }
       if (p === "w-look") {
         // 抬头看窗外：夜景 / 城市的灯。
-        this._lookOut = ease(this._lookOut, 1, 2);
+        this._lookOut = ease(this._lookOut, 1, 2, dt);
         if (this._actionT > 5) {
           this._phase = "w-close";
           this._actionT = 0;
@@ -1434,7 +1438,7 @@
         return;
       }
       if (p === "w-close") {
-        this._lookOut = ease(this._lookOut, 0, 2.5);
+        this._lookOut = ease(this._lookOut, 0, 2.5, dt);
         this._winT = Math.max(0, this._winT - dt / 1.0);
         const s = this._winT * this._winT * (3 - 2 * this._winT);
         this._setWindowOpen(s);
@@ -1458,10 +1462,7 @@
         d = Math.atan2(Math.sin(d), Math.cos(d));
         if (Math.abs(d) < 0.05) {
           this._rootYaw = 0;
-          this._drivesRoot = false;
-          this._sitting = true;
-          this._action = "sit";
-          this._phase = "";
+          this._backToSit();
         }
       }
     }
@@ -1484,10 +1485,9 @@
 
     /** 玩手机：连人带椅转向书桌 → 从桌上拿起手机 → 转回来低头看 → 放回去。 */
     _updatePhoneAction(dt) {
-      const ease = (cur, target, speed) => cur + (target - cur) * Math.min(1, dt * speed);
       const p = this._phase;
       if (p === "p-desk") {
-        this._phoneGrab = ease(this._phoneGrab, 0.3, 2.5);
+        this._phoneGrab = ease(this._phoneGrab, 0.3, 2.5, dt);
         if (this._turnChairTo(Math.PI, dt, 3.2)) {
           this._phase = "p-reach";
           this._actionT = 0;
@@ -1495,7 +1495,7 @@
         return;
       }
       if (p === "p-reach") {
-        this._phoneGrab = ease(this._phoneGrab, 1, 3.5);
+        this._phoneGrab = ease(this._phoneGrab, 1, 3.5, dt);
         if (this._phoneGrab > 0.8) {
           const wasHeld = this._phoneHeld;
           this._transferPhone(true);
@@ -1508,7 +1508,7 @@
         return;
       }
       if (p === "p-turn-back") {
-        this._phoneGrab = ease(this._phoneGrab, 0.72, 2.5);
+        this._phoneGrab = ease(this._phoneGrab, 0.72, 2.5, dt);
         if (this._turnChairTo(0, dt, 3.2)) {
           this._phase = "p-raise";
           this._actionT = 0;
@@ -1516,8 +1516,8 @@
         return;
       }
       if (p === "p-raise") {
-        this._phoneGrab = ease(this._phoneGrab, 0, 4);
-        this._phoneT = ease(this._phoneT, 1, 3.5);
+        this._phoneGrab = ease(this._phoneGrab, 0, 4, dt);
+        this._phoneT = ease(this._phoneT, 1, 3.5, dt);
         if (this._actionT > 1.6) {
           this._phase = "p-read";
           this._actionT = 0;
@@ -1525,7 +1525,7 @@
         return;
       }
       if (p === "p-read") {
-        this._phoneGrab = ease(this._phoneGrab, 0, 4);
+        this._phoneGrab = ease(this._phoneGrab, 0, 4, dt);
         if (this._action === "message" && this._msgText) {
           // 看 3 秒后在手机上回一条，再拿着看一会儿才放下。
           this._msgShown += dt;
@@ -1545,7 +1545,7 @@
         return;
       }
       if (p === "p-lower") {
-        this._phoneT = ease(this._phoneT, 0, 3.5);
+        this._phoneT = ease(this._phoneT, 0, 3.5, dt);
         if (this._actionT > 1.1) {
           this._phase = "p-desk2";
           this._actionT = 0;
@@ -1560,7 +1560,7 @@
         return;
       }
       if (p === "p-place") {
-        this._phoneGrab = ease(this._phoneGrab, 1, 3);
+        this._phoneGrab = ease(this._phoneGrab, 1, 3, dt);
         if (this._actionT > 1.3) {
           this._transferPhone(false);
           if (this._msgText) {
@@ -1577,19 +1577,16 @@
         return;
       }
       if (p === "p-home") {
-        this._phoneGrab = ease(this._phoneGrab, 0, 3);
+        this._phoneGrab = ease(this._phoneGrab, 0, 3, dt);
         if (this._turnChairTo(0, dt, 3.2) && this._actionT > 1.4) {
           this._phoneGrab = 0;
-          this._phase = "";
-          this._action = "sit";
-          this._sitting = true;
+          this._backToSit();
         }
       }
     }
 
     /** 玩电脑：转椅面向书桌、双手放到键盘上敲，屏幕亮起来。 */
     _updateComputer(dt) {
-      const ease = (cur, target, speed) => cur + (target - cur) * Math.min(1, dt * speed);
       const p = this._phase;
       const glow = (on) => {
         if (this._screenMat) {
@@ -1609,7 +1606,7 @@
         return;
       }
       if (p === "c-type") {
-        this._typeT = ease(this._typeT || 0, 1, 2.2);
+        this._typeT = ease(this._typeT || 0, 1, 2.2, dt);
         glow(true);
         if (this._actionT > 24) {
           this._phase = "c-stop";
@@ -1618,7 +1615,7 @@
         return;
       }
       if (p === "c-stop") {
-        this._typeT = ease(this._typeT || 0, 0, 3);
+        this._typeT = ease(this._typeT || 0, 0, 3, dt);
         glow(false);
         if (this._actionT > 1.1) {
           this._phase = "c-home";
@@ -1627,12 +1624,10 @@
         return;
       }
       if (p === "c-home") {
-        this._typeT = ease(this._typeT || 0, 0, 3);
+        this._typeT = ease(this._typeT || 0, 0, 3, dt);
         if (this._turnChairTo(0, dt, 3.2) && (this._typeT || 0) < 0.02) {
           this._typeT = 0;
-          this._phase = "";
-          this._action = "sit";
-          this._sitting = true;
+          this._backToSit();
         }
       }
     }

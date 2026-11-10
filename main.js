@@ -49,18 +49,23 @@
     });
     document.querySelectorAll("[data-action]").forEach(function (btn) {
       btn.addEventListener("click", function () {
-        renderer.setAction(btn.getAttribute("data-action"));
-        if (btn.getAttribute("data-action") === "sleep") renderer.setCameraPreset("bed");
-        if (btn.getAttribute("data-action") === "window") renderer.setCameraPreset("window");
-        syncToggles();
+        applyAction(btn.getAttribute("data-action"));
       });
     });
     document.getElementById("room-toggle").addEventListener("change", function (e) {
-      renderer.setRoomVisible(e.target.checked);
+      setRoomVisible(e.target.checked);
     });
     document.getElementById("sit-toggle").addEventListener("change", function (e) {
       renderer.setSitting(e.target.checked);
     });
+
+    /** 房间显隐：桌面版里顺便切换桌宠模式（透明置顶窗口）。 */
+    function setRoomVisible(on) {
+      renderer.setRoomVisible(on);
+      var box = document.getElementById("room-toggle");
+      if (box) box.checked = on;
+      if (window.aiWorldDesktop) window.aiWorldDesktop.setPetMode(!on);
+    }
 
     // ---- 文字驱动：不接任何语音/智能体，也能用一句话让人物动起来 ----
     // 同步左上角开关，避免睡下/站起后"坐姿"勾选状态和实际姿态不一致。
@@ -81,6 +86,15 @@
       if (text) captionTimer = setTimeout(function () { captionEl.style.opacity = "0"; }, 1800);
     }
 
+    // 动作 + 对应机位：按钮和文字指令共用一份映射。
+    function applyAction(code) {
+      renderer.setAction(code);
+      if (code === "sleep") renderer.setCameraPreset("bed");
+      else if (code === "window") renderer.setCameraPreset("window");
+      else if (code === "computer") renderer.setCameraPreset("desk");
+      syncToggles();
+    }
+
     var RULES = [
       [/起床|醒来|睡醒|别睡/, "wake", "起床"],
       [/睡觉|睡吧|躺下|上床|晚安|休息|困/, "sleep", "上床睡觉"],
@@ -98,10 +112,8 @@
       [/显示房间|打开房间/, "room:on", "显示房间"],
     ];
 
-    /** 解析一句自然语言并驱动人物，命中返回 true。 */
-    function runCommand(text) {
-      var s = String(text || "");
-      if (!s.trim()) return false;
+    /** 只跑本地动作规则，命中返回 true。 */
+    function runLocalRule(s) {
       for (var i = 0; i < RULES.length; i++) {
         if (!RULES[i][0].test(s)) continue;
         var code = RULES[i][1];
@@ -115,19 +127,21 @@
         } else if (code.indexOf("preset:") === 0) {
           renderer.setCameraPreset(code.slice(7));
         } else if (code.indexOf("room:") === 0) {
-          var on = code.slice(5) === "on";
-          renderer.setRoomVisible(on);
-          document.getElementById("room-toggle").checked = on;
+          setRoomVisible(code.slice(5) === "on");
         } else {
-          renderer.setAction(code);
-          if (code === "sleep") renderer.setCameraPreset("bed");
-          if (code === "window") renderer.setCameraPreset("window");
-          if (code === "computer") renderer.setCameraPreset("desk");
+          applyAction(code);
         }
-        syncToggles();
         caption("→ " + label);
         return true;
       }
+      return false;
+    }
+
+    /** 解析一句自然语言并驱动人物（本地兜底路径，没有后台智能体时用）。 */
+    function runCommand(text) {
+      var s = String(text || "");
+      if (!s.trim()) return false;
+      if (runLocalRule(s)) return true;
       // 不是动作指令，就当成一条发给角色的消息：
       // 桌面手机弹提示 → 她自动去拿手机看 → 回复 → 放下；要她做事的消息会直接去电脑。
       if (renderer.notifyMessage && renderer.notifyMessage(s)) {
@@ -136,6 +150,20 @@
       }
       caption("没听懂：" + s);
       return false;
+    }
+
+    /** HUD 提交：动作指令本地立即执行；其余交给后台智能体，没接入时本地兜底。 */
+    function submitText(raw) {
+      var s = String(raw || "").trim();
+      if (!s) return false;
+      if (runLocalRule(s)) return true;
+      var bridge = window.__worldBridge;
+      if (bridge && bridge.connected) {
+        bridge.send({ type: "user", text: s });
+        caption("已发送给智能体：" + s);
+        return true;
+      }
+      return runCommand(s);
     }
 
     // 角色回复/说话时同步到字幕，并转发给智能体桥（接了的话）。
@@ -156,11 +184,67 @@
       form.addEventListener("submit", function (ev) {
         ev.preventDefault();
         var input = document.getElementById("cmd-input");
-        runCommand(input.value);
+        submitText(input.value);
         input.value = "";
         input.focus();
       });
     }
+
+    // ---- 语音输入：浏览器自带的语音识别（Edge / Chrome，中文） ----
+    // 识别结果当成一句话走 submitText，和打字完全同一条链路。
+    (function setupMic() {
+      var mic = document.getElementById("mic-btn");
+      var input = document.getElementById("cmd-input");
+      if (!mic || !input) return;
+      var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) {
+        mic.disabled = true;
+        mic.textContent = "无语音";
+        mic.title = "当前浏览器不支持语音识别，请用文字输入";
+        return;
+      }
+      var rec = new SR();
+      rec.lang = "zh-CN";
+      rec.interimResults = true;
+      rec.continuous = false;
+      var listening = false;
+
+      function setListening(on) {
+        listening = on;
+        mic.textContent = on ? "听…" : "说话";
+        mic.classList.toggle("listening", on);
+      }
+
+      rec.onstart = function () {
+        setListening(true);
+      };
+      rec.onresult = function (ev) {
+        var text = "";
+        for (var i = 0; i < ev.results.length; i++) text += ev.results[i][0].transcript;
+        input.value = text;
+      };
+      rec.onerror = function (ev) {
+        var err = ev && ev.error ? ev.error : "unknown";
+        if (err !== "aborted") caption("语音识别失败：" + err);
+      };
+      rec.onend = function () {
+        setListening(false);
+        var text = input.value.trim();
+        input.value = "";
+        if (text) submitText(text);
+      };
+      mic.addEventListener("click", function () {
+        if (listening) {
+          rec.stop();
+          return;
+        }
+        try {
+          rec.start();
+        } catch (_e) {
+          /* 已在识别中，忽略重复点击 */
+        }
+      });
+    })();
 
     window.addEventListener("resize", function () {
       canvas.width = window.innerWidth;

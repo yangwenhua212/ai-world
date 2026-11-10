@@ -15,6 +15,12 @@
  *   { type: "command", text: "我想睡觉了" }   // 自然语言，不需要语音
  *   { type: "message", text: "帮我整理一下桌面", mode?: "auto" | "task" | "chat", reply?: "…" }
  *     给角色发消息：桌面手机提示 → 自动拿起看 → 回复 → 放下；task 模式直接去电脑干活。
+ *
+ * 页面发给智能体的消息（WS 方向相反）：
+ *   { type: "hello", role: "world" }           连接建立
+ *   { type: "user", text: "今天过得怎么样" }    用户在 HUD 里输入 / 语音识别出的内容
+ *   { type: "reply", text: "…" }               角色说出的回复（可用来做上下文）
+ *   { type: "speech-end", interrupted: false } 一段语音播完 / 被打断
  */
 (function (global) {
   "use strict";
@@ -66,8 +72,12 @@
     }
 
     _status(text) {
-      const el = typeof document !== "undefined" ? document.getElementById("bridge") : null;
+      const el = this._el("bridge");
       if (el) el.textContent = text;
+    }
+
+    _el(id) {
+      return typeof document !== "undefined" ? document.getElementById(id) : null;
     }
 
     _connect() {
@@ -116,6 +126,10 @@
         this._retryTimer = null;
         this._connect();
       }, wait);
+    }
+
+    get connected() {
+      return !!(this._ws && this._ws.readyState === 1);
     }
 
     send(obj) {
@@ -178,7 +192,7 @@
     }
 
     _caption(text) {
-      const el = typeof document !== "undefined" ? document.getElementById("caption") : null;
+      const el = this._el("caption");
       if (!el) return;
       el.textContent = text;
       el.style.opacity = text ? "1" : "0";
