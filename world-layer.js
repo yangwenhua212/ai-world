@@ -95,9 +95,16 @@
       this._msgBlink = 0; // 提示闪烁相位
       this._lieT = 0; // 躺下权重
       this._blanketT = 0; // 被子盖上来的进度
+      this._blanketGoal = 0; // 被子该铺到的目标（1 = 盖到胸口）
+      this._blanketHandT = 0; // 右手扶被子边缘的权重
+      this._pullT = 0; // 躺在床上拉被子的进度
+      this._shoesOn = true; // 鞋子是否穿着（上床后脱掉）
+      this._screenSleepT = 1; // 电脑屏幕息屏程度（0=亮着，1=全黑）
       this._eyeT = 0; // 睡觉闭眼的权重
       this._reachT = 0; // 伸手够窗把手的权重
       this._reachAim = new this.THREE.Vector3(); // 手要落到的世界坐标
+      this._tapT = 0; // 左手点手机屏幕的权重
+      this._phoneLiftT = 1; // 手机从桌面吸附到掌心的过渡进度
       this._mouseMesh = null; // 桌面鼠标：玩电脑时右手放上去
       this._lieYFix = null; // 躺下后按包围盒修正的高度
       this._bedSitPos = null; // 坐床沿时的根节点位置（测量得出）
@@ -408,6 +415,17 @@
       back.position.set(0, 0.70, -0.24);
       back.rotation.x = 0.12;
       chair.add(back);
+
+      // 转椅也是落地障碍：走路时绕开椅子，不会从椅子里穿过去。
+      // 用椅心 ±0.25m（五爪半径）的方形占地，转椅转到哪个角度都适用。
+      this._obstacles.push({
+        x0: CHAIR_POS[0] - 0.25,
+        x1: CHAIR_POS[0] + 0.25,
+        z0: CHAIR_POS[2] - 0.25,
+        z1: CHAIR_POS[2] + 0.25,
+      });
+      this._path = null;
+      this._pathGoal = null;
     }
 
     _place(name, target, axis, pos, rotY, rotZ, tint) {
@@ -662,6 +680,8 @@
       this._captureFingerPose(vrm);
       this._applyRelaxedArms();
       this._buildHandPhone(vrm, scale);
+      this._collectShoeMeshes(vrm);
+      this._shoesOn = true;
 
       // 换模型时回到初始坐姿。
       this._lieT = 0;
@@ -758,6 +778,17 @@
         .filter(Boolean);
     }
 
+    /** 找出模型里的鞋子网格：VRM 的鞋子是独立材质的图元，上床时直接把它们收起来。 */
+    _collectShoeMeshes(vrm) {
+      const list = [];
+      vrm.scene.traverse((o) => {
+        if (!o.isMesh || !o.material) return;
+        const mats = Array.isArray(o.material) ? o.material : [o.material];
+        if (mats.some((m) => m && /shoe/i.test(m.name || ""))) list.push(o);
+      });
+      this._shoeMeshes = list;
+    }
+
     /** 把手里的手机挂到右手骨骼上（随手臂一起动）。 */
     _buildHandPhone(vrm, scale) {
       const THREE = this.THREE;
@@ -826,6 +857,8 @@
       }
       this._phoneBasisQ = basisQuat;
       this._handBaseQ = hand.quaternion.clone();
+      this._phoneHomePos = phone.position.clone();
+      this._phoneHomeQ = phone.quaternion.clone();
       phone.visible = false;
       hand.add(phone);
       this._handPhone = phone;
@@ -842,7 +875,8 @@
       const phone = this._handPhone;
       if (!hand || !phone || !phone.visible || !this._avatar) return;
       const w = Math.max(0, Math.min(1, weight == null ? this._phoneT : weight));
-      if (w < 0.02) return;
+      const lifting = (this._phoneLiftT || 1) < 1;
+      if (w < 0.02 && !lifting) return;
       const h = this._avatar.humanoid;
       const head = h && h.getNormalizedBoneNode("head");
       this._avatar.scene.updateMatrixWorld(true);
@@ -883,7 +917,18 @@
       const handWorldTarget = worldQ.multiply(this._phoneBasisQ.clone().invert());
       const parentQ = hand.parent.getWorldQuaternion(new THREE.Quaternion());
       const localTarget = parentQ.invert().multiply(handWorldTarget);
-      hand.quaternion.copy(this._handBaseQ).slerp(localTarget, w);
+      if (w >= 0.02) hand.quaternion.copy(this._handBaseQ).slerp(localTarget, w);
+
+      // 从桌面拿起来的过渡：手机从桌面位置滑到掌心。
+      if (lifting && this._phoneLiftFromPos) {
+        this._phoneLiftT = Math.min(1, (this._phoneLiftT || 0) + (this._dt || 0.016) / 0.3);
+        const k = this._phoneLiftT * this._phoneLiftT * (3 - 2 * this._phoneLiftT);
+        phone.position.lerpVectors(this._phoneLiftFromPos, phone.position, k);
+        if (this._phoneHomeQ) {
+          phone.quaternion.copy(this._phoneLiftFromQ || this._phoneHomeQ)
+            .slerp(this._phoneHomeQ, k);
+        }
+      }
     }
 
     setSitting(on) {
@@ -981,6 +1026,9 @@
         this._action = "sleep";
         this._sitting = false;
         this._clearLieState();
+        this._blanketGoal = 0; // 被子留在床脚，等躺下后自己拉
+        this._blanketHandT = 0;
+        this._pullT = 0;
         this._lieRoot = this._rollLieRoot();
         if (this._poseT > 0.05) {
           this._phase = "stand-up";
@@ -1065,6 +1113,12 @@
       this._msgNotifyT = 0;
       this._msgShown = 0;
       this._msgReplied = false;
+      // 动作被打断时把被子/鞋子/点屏幕这些临时状态收干净。
+      this._blanketGoal = 0;
+      this._blanketHandT = 0;
+      this._pullT = 0;
+      this._shoesOn = true;
+      this._tapT = 0;
       if (this._deskBadge) this._deskBadge.visible = false;
       if (this._deskScreen) this._drawPhoneHome(this._deskScreen);
       if (this._handScreen) this._drawPhoneHome(this._handScreen);
@@ -1106,7 +1160,7 @@
       return (this._bedBox && this._bedBox.top) || 0.355;
     }
 
-    /** 被子：睡觉时从床脚一直拉到胸口，罩在躺着的身体上。 */
+    /** 被子：一直叠在床脚（不能凭空出现），躺下后由她用手拉到胸口。 */
     _buildBlanket() {
       const THREE = this.THREE;
       const w = 1.32; // 床脚 → 胸口（躺平后脚 x≈1.28、胸口 x≈2.20）
@@ -1142,21 +1196,25 @@
       );
       mesh.position.set(1.02, this._bedTop(), BED_SLEEP_Z);
       mesh.scale.x = 0.16;
-      mesh.visible = false;
+      mesh.scale.y = 0.5; // 叠在床脚时压扁一点，像一床收好的被子
       this.group.add(mesh);
       this._blanket = mesh;
     }
 
-    /** 被子的拉/掀：睡觉时铺上来，起床时收回床脚。 */
+    /** 被子的拉/掀：目标由行为状态机给，拉的时候右手扶着被面一起走。 */
     _updateBlanket(dt) {
-      const asleep = this._action === "sleep" && this._phase === "sleep";
-      this._blanketT = ease(this._blanketT || 0, asleep ? 1 : 0, asleep ? 1.3 : 2.0, dt);
+      const goal = this._blanketGoal || 0;
+      this._blanketT = ease(
+        this._blanketT || 0,
+        goal,
+        goal > (this._blanketT || 0) ? 1.35 : 2.0,
+        dt
+      );
       const b = this._blanket;
       if (!b) return;
       const t = this._blanketT;
-      b.visible = t > 0.01;
-      if (!b.visible) return;
       b.scale.x = 0.16 + 0.84 * t;
+      b.scale.y = 0.5 + 0.5 * t;
       // 刚拉起来时前缘略离床，铺好后落回被面。
       b.position.y = this._bedTop() - 0.02 + 0.05 * (1 - t);
       if (this._lieRoot) b.position.z = this._lieRoot.z;
@@ -1434,18 +1492,10 @@
       }
 
       if (a !== "phone" && a !== "message") this._phoneT = ease(this._phoneT, 0, 3, dt);
-      // 打字权重和电脑屏幕亮度：离开电脑动作就平滑收回，
-      // 否则从"玩电脑"切到手机/窗边时手臂还保持着打字姿势。
+      // 打字权重：离开电脑动作就平滑收回，否则从"玩电脑"切到手机/窗边时
+      // 手臂还保持着打字姿势。屏幕亮度统一在 update() 里按"有人用/没人用"控制。
       if (a !== "computer") {
         this._typeT = ease(this._typeT || 0, 0, 3, dt);
-        if (this._screenMat && this._screenBase != null) {
-          this._screenMat.emissiveIntensity = ease(
-            this._screenMat.emissiveIntensity,
-            this._screenBase,
-            3,
-            dt
-          );
-        }
       }
 
       if (a === "window") {
@@ -1536,7 +1586,8 @@
         // 晚一点才有坐点会让根节点高度中途跳一下。
         if (!this._bedSitPos) this._measureBedSit();
         if (this._poseT >= 0.99 && this._bedSitPos) {
-          // 坐稳了再把脚收上床。
+          // 坐上床沿先把鞋脱了，再收脚上床。
+          this._shoesOn = false;
           this._bedFold = 1;
           this._bedShin = 1;
           this._bedSitLeg = 1;
@@ -1575,6 +1626,27 @@
         if (this._lieT >= 1) {
           this._lieT = 1;
           this._bedFold = 0;
+          // 躺好以后不自动盖被子：先伸手把被子拉到胸口。
+          this._phase = "pull";
+          this._pullT = 0;
+          this._blanketGoal = 1;
+        }
+        return;
+      }
+      if (phase === "pull") {
+        // 躺在床上伸手拉被子：被子往前铺，右手扶住被面跟着走，拉完才闭眼。
+        this._lieT = 1;
+        this._bedFold = 0;
+        this._bedShin = 0;
+        this._blanketGoal = 1;
+        this._pullT = Math.min(1, (this._pullT || 0) + dt / 1.6);
+        const b = this._blanketT || 0;
+        // 被子前沿进到手臂可及的范围后手才扶上去，快铺到胸口时松开。
+        const grip = Math.max(0, Math.min(1, (b - 0.5) / 0.18));
+        const release = Math.max(0, Math.min(1, (b - 0.85) / 0.12));
+        this._blanketHandT = grip * (1 - release);
+        if (b >= 0.985 || this._pullT >= 2.6) {
+          this._blanketHandT = 0;
           this._phase = "sleep";
           this._sleepT = 0;
         }
@@ -1589,7 +1661,9 @@
         return;
       }
       if (phase === "get-up") {
-        // 起床：先直着腿坐起来，再把小腿放下床沿，最后站起来。
+        // 起床：被子先顺着身体滑回床脚，再直着腿坐起来。
+        this._blanketGoal = 0;
+        this._blanketHandT = 0;
         this._sitting = true;
         this._lieT = Math.max(0, this._lieT - dt / 1.2);
         this._bedFold = this._foldForLie(this._lieT);
@@ -1622,6 +1696,7 @@
           this._bedSitLeg = 1;
           this._legT = 0;
           this._sitting = false;
+          this._shoesOn = true; // 脚落回地面，把鞋穿上再走
           this._phase = "walk-back";
           this._enterWalk(AVATAR_POS[0], AVATAR_POS[2]);
         }
@@ -1759,16 +1834,44 @@
       return Math.abs(d) < 0.02;
     }
 
-    /** 手机在"桌面道具"和"手持道具"之间切换。 */
+    /** 手机在"桌面道具"和"手持道具"之间切换；拿到手里时从桌面位置滑过去，不瞬移。 */
     _transferPhone(toHand) {
+      const THREE = this.THREE;
       this._phoneHeld = !!toHand;
       if (this._deskPhone) this._deskPhone.forEach((o) => { o.visible = !toHand; });
-      if (this._handPhone && !toHand) this._handPhone.visible = false;
+      const phone = this._handPhone;
+      if (!phone) return;
+      if (!toHand) {
+        phone.visible = false;
+        this._phoneLiftT = 1;
+        return;
+      }
+      // 把手机先摆到桌面手机的世界位置，再在 0.3s 内滑到掌心握持位，
+      // 这样从桌面上拿起来是连贯的，不会一帧跳进手里。
+      const hand = this._handBone;
+      const desk = this._deskPhone && this._deskPhone[0];
+      if (hand && desk && this._phoneHomePos) {
+        this._avatar.scene.updateMatrixWorld(true);
+        const worldPos = desk.getWorldPosition(new THREE.Vector3());
+        const worldQ = desk.getWorldQuaternion(new THREE.Quaternion());
+        const parentQ = hand.getWorldQuaternion(new THREE.Quaternion()).invert();
+        hand.worldToLocal(worldPos);
+        this._phoneLiftFromPos = worldPos;
+        this._phoneLiftFromQ = parentQ.multiply(worldQ);
+        this._phoneLiftT = 0;
+        phone.position.copy(worldPos);
+        phone.quaternion.copy(this._phoneLiftFromQ);
+      } else {
+        this._phoneLiftT = 1;
+      }
+      phone.visible = true;
     }
 
     /** 玩手机：连人带椅转向书桌 → 从桌上拿起手机 → 转回来低头看 → 放回去。 */
     _updatePhoneAction(dt) {
       const p = this._phase;
+      // 回消息时左手伸到屏幕上点几下；其他阶段慢慢收回来。
+      this._tapT = ease(this._tapT || 0, 0, 4, dt);
       if (p === "p-desk") {
         this._phoneGrab = ease(this._phoneGrab, 0.3, 2.5, dt);
         if (this._turnChairTo(Math.PI, dt, 3.2)) {
@@ -1779,11 +1882,10 @@
       }
       if (p === "p-reach") {
         this._phoneGrab = ease(this._phoneGrab, 1, 3.5, dt);
-        if (this._phoneGrab > 0.8) {
-          const wasHeld = this._phoneHeld;
+        if (this._phoneGrab > 0.9 && !this._phoneHeld) {
           this._transferPhone(true);
           // 拿到手的那一刻，手机屏幕上就是收到的消息。
-          if (!wasHeld && this._action === "message" && this._msgText) {
+          if (this._action === "message" && this._msgText) {
             this._drawScreen(this._handScreen, "新消息", this._msgText, "#ffcf7a", "来自智能体");
           }
         }
@@ -1812,6 +1914,9 @@
         if (this._action === "message" && this._msgText) {
           // 看 3 秒后在手机上回一条，再拿着看一会儿才放下。
           this._msgShown += dt;
+          // 回消息前后左手伸到屏幕上方轻点，回完再收回去。
+          const tapping = this._msgShown > 2.3 && this._msgShown < 4.9;
+          this._tapT = ease(this._tapT || 0, tapping ? 1 : 0, tapping ? 6 : 4, dt);
           if (!this._msgReplied && this._msgShown > 3.0) {
             this._msgReplied = true;
             this._drawScreen(this._handScreen, "已回复", this._msgReply, "#8ef0b6", "已发送");
@@ -2175,14 +2280,44 @@
       chain.forEach((b, i) => b.quaternion.copy(base[i]).slerp(solved[i], weight));
     }
 
-    /** 每帧在姿态算完之后做手臂 IK：打字时右手在鼠标上，开窗时双手在窗扇上。 */
+    /** 每帧在姿态算完之后做手臂 IK：鼠标、开窗、拉被子、左手点手机屏。 */
     _updateReach() {
       const type = this._typeT || 0;
       const reach = this._reachT || 0;
+      const tap = this._tapT || 0;
+      const blanket = this._blanketHandT || 0;
       const sash = this._winSashes && this._winSashes[1];
       const hasSash = !!(sash && sash.handle);
-      if (type <= 0.02 && (reach <= 0.02 || !hasSash)) return;
-      this.group.updateMatrixWorld(true); // 窗扇刚转过，把手的世界坐标要重新算
+      if (tap <= 0.02 && blanket <= 0.02 && type <= 0.02 && (reach <= 0.02 || !hasSash)) {
+        return;
+      }
+      this.group.updateMatrixWorld(true); // 窗扇/被子刚动过，世界坐标要重新算
+
+      // 左手点手机屏幕：掌心落到屏幕上，指尖带一点轻点的小起伏。
+      if (tap > 0.02 && this._handPhone && this._handPhone.visible) {
+        const THREE = this.THREE;
+        this._avatar.scene.updateMatrixWorld(true);
+        const phone = this._handPhone;
+        const aim = phone.getWorldPosition(new THREE.Vector3());
+        const n = new THREE.Vector3(0, 1, 0)
+          .applyQuaternion(phone.getWorldQuaternion(new THREE.Quaternion()));
+        aim.addScaledVector(n, 0.012);
+        if (tap > 0.55) aim.addScaledVector(n, Math.abs(Math.sin(this._time * 13)) * 0.012);
+        this._reachArm("left", aim, tap);
+        return;
+      }
+
+      // 拉被子：右手扶住被子前沿，被子往上铺时手跟着走。
+      if (blanket > 0.02 && this._blanket) {
+        const THREE = this.THREE;
+        const b = this._blanket;
+        const w = b.geometry.parameters.width;
+        const aim = new THREE.Vector3(w - 0.24, 0.26, 0);
+        b.localToWorld(aim);
+        this._reachArm("right", this._clampReach(aim, "right"), blanket);
+        return;
+      }
+
       if (type > 0.02 && this._mouseMesh) {
         // 掌心落在鼠标顶面，手腕自然抬高一点。
         this._mouseMesh.getWorldPosition(this._reachAim);
@@ -2191,14 +2326,31 @@
         return;
       }
       if (!hasSash) return;
-      // 右手扶把手，左手扶同一扇窗的外侧竖框：两只手一起推窗。
+      // 右手扶右扇把手，左手扶左扇把手，两只手各自推开一扇；不能两只手都够右扇，
+      // 否则左手要横穿身体，胳膊会被拧成麻花。
       sash.handle.getWorldPosition(this._reachAim);
       this._reachArm("right", this._reachAim, reach);
-      this._winLeftTarget = this._winLeftTarget || new this.THREE.Vector3();
-      // 左手落在窗扇外侧竖框的下部（更靠她左手一侧，不会横穿身体）。
-      this._winLeftTarget.set(-0.64, -0.60, 0.04);
-      sash.g.localToWorld(this._winLeftTarget);
-      this._reachArm("left", this._winLeftTarget, reach);
+      const sashL = this._winSashes[0];
+      if (sashL && sashL.handle) {
+        this._winLeftTarget = this._winLeftTarget || new this.THREE.Vector3();
+        sashL.handle.getWorldPosition(this._winLeftTarget);
+        this._reachArm("left", this._winLeftTarget, reach);
+      }
+    }
+
+    /** 目标超出手臂长度时沿肩→目标方向收回来，避免把胳膊拉成一根直棍。 */
+    _clampReach(target, side, max) {
+      const THREE = this.THREE;
+      const h = this._avatar && this._avatar.humanoid;
+      const up = h && h.getNormalizedBoneNode((side === "left" ? "left" : "right") + "UpperArm");
+      if (!up) return target;
+      this._avatar.scene.updateMatrixWorld(true);
+      const shoulder = up.getWorldPosition(new THREE.Vector3());
+      const d = target.clone().sub(shoulder);
+      const len = d.length();
+      const limit = max || 0.5;
+      if (len > limit) target.copy(shoulder).addScaledVector(d.multiplyScalar(1 / len), limit);
+      return target;
     }
 
     /** 手臂：坐姿搭腿 / 伸懒腰 / 玩手机 / 走路摆臂，都叠加在放松姿态上。 */
@@ -2545,9 +2697,30 @@
 
     update(dt) {
       this._time += dt;
+      this._dt = dt;
+      if (this._action !== "phone" && this._action !== "message") {
+        this._tapT = ease(this._tapT || 0, 0, 4, dt);
+      }
       this._updatePose(dt);
       this._updateReach();
       this._updateBlanket(dt);
+      // 电脑没人用就息屏：屏幕不再发光，桌面的蓝色补光也一起收掉。
+      if (this._screenMat && this._screenBase != null) {
+        const typing = (this._typeT || 0) > 0.05;
+        this._screenSleepT = ease(this._screenSleepT || 0, typing ? 0 : 1, 1.5, dt);
+        if (!typing) {
+          const lit = 1 - 0.94 * this._screenSleepT;
+          this._screenMat.emissiveIntensity = this._screenBase * lit;
+          if (this._screenLight) {
+            this._screenLight.intensity = (this._isNight ? 1.1 : 0.45) * lit;
+          }
+        }
+      }
+      // 上床脱鞋、起床穿鞋。
+      if (this._shoeMeshes) {
+        const on = this._shoesOn !== false;
+        for (let i = 0; i < this._shoeMeshes.length; i++) this._shoeMeshes[i].visible = on;
+      }
       // 睡着时闭眼，醒来慢慢睁开；闭眼期间不再做随机眨眼。
       const asleep = this._action === "sleep" && this._phase === "sleep";
       this._eyeT = ease(this._eyeT || 0, asleep ? 1 : 0, 1.8, dt);
