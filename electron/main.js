@@ -12,6 +12,7 @@
 
 const { app, BrowserWindow, Menu, ipcMain } = require("electron");
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const path = require("path");
 
@@ -37,6 +38,27 @@ const MIME = {
 let win = null;
 let petMode = false;
 let origin = "";
+
+/** 智能体配置：存到用户目录，避免每次启动端口变化导致 localStorage 丢失。 */
+function configFile() {
+  return path.join(app.getPath("userData"), "agent-config.json");
+}
+
+function readConfig() {
+  try {
+    return JSON.parse(fs.readFileSync(configFile(), "utf8"));
+  } catch (_e) {
+    return null;
+  }
+}
+
+function writeConfig(cfg) {
+  try {
+    fs.writeFileSync(configFile(), JSON.stringify(cfg || {}, null, 2), "utf8");
+  } catch (err) {
+    console.warn("[ai-world] 智能体配置写入失败：", err);
+  }
+}
 
 /** 起本地静态服务，端口交给系统分配，避免和 8080 冲突。 */
 function startServer() {
@@ -120,9 +142,81 @@ ipcMain.on("pet-mode", (_ev, on) => {
   createWindow(!!on);
 });
 
+ipcMain.on("agent-config:load", (ev) => {
+  ev.returnValue = readConfig();
+});
+
+ipcMain.on("agent-config:save", (_ev, cfg) => {
+  writeConfig(cfg);
+});
+
+ipcMain.on("agent-settings", () => {
+  if (!win) return;
+  win.webContents.executeJavaScript(
+    "(function(){var b=document.getElementById('agent-btn'); if(b) b.click();})()"
+  );
+});
+
+/** 内置模型请求走主进程：绕开页面跨域限制，任何 OpenAI 兼容接口都能用。 */
+function llmRequest(payload) {
+  return new Promise((resolve) => {
+    let u;
+    try {
+      u = new URL(String(payload.url || ""));
+    } catch (_e) {
+      resolve({ ok: false, status: 0, error: "接口地址不合法" });
+      return;
+    }
+    const body = String(payload.body || "");
+    const headers = Object.assign({}, payload.headers || {}, {
+      "Content-Length": Buffer.byteLength(body),
+    });
+    const lib = u.protocol === "https:" ? https : http;
+    const req = lib.request(
+      {
+        method: "POST",
+        hostname: u.hostname,
+        port: u.port || (u.protocol === "https:" ? 443 : 80),
+        path: u.pathname + u.search,
+        headers: headers,
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => (data += c));
+        res.on("end", () =>
+          resolve({ ok: res.statusCode >= 200 && res.statusCode < 300, status: res.statusCode, body: data })
+        );
+      }
+    );
+    req.setTimeout(25000, () => req.destroy(new Error("请求超时")));
+    req.on("error", (err) => resolve({ ok: false, status: 0, error: String(err.message || err) }));
+    req.write(body);
+    req.end();
+  });
+}
+
+ipcMain.handle("llm:request", (_ev, payload) => llmRequest(payload || {}));
+
 function buildMenu() {
   Menu.setApplicationMenu(
     Menu.buildFromTemplate([
+      {
+        label: "智能体",
+        submenu: [
+          {
+            label: "智能体设置…",
+            accelerator: "CmdOrCtrl+,",
+            click: () => {
+              if (win) {
+                win.webContents.executeJavaScript(
+                  "(function(){var b=document.getElementById('agent-btn'); if(b) b.click();})()"
+                );
+              }
+            },
+          },
+        ],
+      },
       {
         label: "视图",
         submenu: [

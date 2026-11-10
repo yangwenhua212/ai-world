@@ -38,8 +38,28 @@
 
     window.__aiWorldRenderer = renderer;
     var Bridge = window.AiWorldBridge;
-    if (Bridge) {
-      window.__worldBridge = new Bridge(renderer, {});
+    var bridgeUrl = null;
+
+    /** 按当前配置（重新）建立智能体桥：设置面板保存后也会调这里。 */
+    function applyConfig() {
+      var cfg = window.AiWorldConfig ? window.AiWorldConfig.get() : {};
+      var url = cfg.bridgeUrl || "";
+      if (window.__worldBridge && url === bridgeUrl) return;
+      if (window.__worldBridge) {
+        window.__worldBridge.dispose();
+        window.__worldBridge = null;
+      }
+      if (Bridge) window.__worldBridge = new Bridge(renderer, { url: url || undefined });
+      bridgeUrl = url;
+    }
+    applyConfig();
+    window.__worldApplyConfig = applyConfig;
+
+    var agentBtn = document.getElementById("agent-btn");
+    if (agentBtn && window.AiWorldConfig) {
+      agentBtn.addEventListener("click", function () {
+        window.AiWorldConfig.openSettings();
+      });
     }
 
     document.querySelectorAll("[data-preset]").forEach(function (btn) {
@@ -152,7 +172,36 @@
       return false;
     }
 
-    /** HUD 提交：动作指令本地立即执行；其余交给后台智能体，没接入时本地兜底。 */
+    /** 让她"说"一句话：同步字幕，并转发给智能体桥（接了的话）。 */
+    function say(text) {
+      window.dispatchEvent(new CustomEvent("ai-world-say", { detail: String(text || "") }));
+    }
+
+    /** 内置模型的回复：动作直接执行，闲聊走"拿手机看消息再回复"的流程。 */
+    function applyAgentReply(text, res) {
+      var action = res.action || "";
+      var label = window.AiWorldAgent ? window.AiWorldAgent.actionLabel : function (n) { return n; };
+      if (action === "sit" || action === "stand") {
+        renderer.setSitting(action === "sit");
+        var box = document.getElementById("sit-toggle");
+        if (box) box.checked = action === "sit";
+        caption("→ " + label(action));
+        return;
+      }
+      if (action) {
+        applyAction(action);
+        if (res.reply) say(res.reply);
+        else caption("→ " + label(action));
+        return;
+      }
+      if (res.reply && renderer.notifyMessage) {
+        renderer.notifyMessage(text, { mode: "chat", reply: res.reply });
+      } else {
+        runCommand(text);
+      }
+    }
+
+    /** HUD 提交：动作指令本地立即执行；其余后台智能体 → 内置模型 → 本地兜底。 */
     function submitText(raw) {
       var s = String(raw || "").trim();
       if (!s) return false;
@@ -161,6 +210,23 @@
       if (bridge && bridge.connected) {
         bridge.send({ type: "user", text: s });
         caption("已发送给智能体：" + s);
+        return true;
+      }
+      var cfg = window.AiWorldConfig ? window.AiWorldConfig.get() : {};
+      if (cfg.llmUrl && cfg.llmModel && window.AiWorldAgent) {
+        caption("思考中…");
+        window.AiWorldAgent.chat(s)
+          .then(function (res) {
+            if (!res || (!res.action && !res.reply)) {
+              runCommand(s);
+              return;
+            }
+            applyAgentReply(s, res);
+          })
+          .catch(function (err) {
+            caption("模型调用失败：" + (err && err.message ? err.message : err));
+            runCommand(s);
+          });
         return true;
       }
       return runCommand(s);
