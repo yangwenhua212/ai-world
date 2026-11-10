@@ -525,7 +525,7 @@
       this._box(0.24, 0.02, 0.14, bodyMat, -0.30, DESK_TOP + 0.09, -1.50);
 
       // 键盘与杯子。
-      this._box(0.44, 0.018, 0.15, this._mat(0xd9dde5), -0.30, DESK_TOP + 0.02, -1.08);
+      this._box(0.44, 0.018, 0.15, this._mat(0xd9dde5), -0.40, DESK_TOP + 0.02, -1.08);
       const mug = new THREE.Mesh(
         new THREE.CylinderGeometry(0.045, 0.04, 0.10, 16),
         this._mat(0xe8e2d8)
@@ -533,26 +533,26 @@
       mug.position.set(-0.74, DESK_TOP + 0.05, -1.16);
       this.group.add(mug);
 
-      // 鼠标垫 + 鼠标（键盘右侧，靠近她一侧，坐着才够得到）。
+      // 鼠标垫 + 鼠标（键盘右侧，靠近她一侧；放到右手自然下垂的位置，手才按得实）。
       const padMat = this._mat(0x2b3550, { roughness: 1 });
-      this._box(0.22, 0.006, 0.18, padMat, 0.05, DESK_TOP + 0.004, -1.09);
+      this._box(0.22, 0.006, 0.18, padMat, -0.08, DESK_TOP + 0.004, -1.09);
       const mouseMat = this._mat(0xe6eaf2, { roughness: 0.55 });
       const mouse = new THREE.Mesh(new THREE.SphereGeometry(0.042, 16, 12), mouseMat);
       mouse.scale.set(1, 0.48, 1.55);
-      mouse.position.set(0.05, DESK_TOP + 0.026, -1.09);
+      mouse.position.set(-0.08, DESK_TOP + 0.026, -1.09);
       this.group.add(mouse);
       this._mouseMesh = mouse;
       // 滚轮。
-      this._box(0.012, 0.008, 0.02, this._mat(0x3a4150), 0.05, DESK_TOP + 0.045, -1.12);
+      this._box(0.012, 0.008, 0.02, this._mat(0x3a4150), -0.08, DESK_TOP + 0.045, -1.12);
 
-      // 桌面手机（平放，屏幕朝上）。放在鼠标左后方，坐着伸手刚好能拿到。
+      // 桌面手机（平放，屏幕朝上）。放在鼠标右后方，坐着伸手刚好能拿到。
       const phoneMat = this._mat(0x1c1f26, { roughness: 0.5, metalness: 0.2 });
       const deskPhone = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.009, 0.155), phoneMat);
-      deskPhone.position.set(0.02, DESK_TOP + 0.006, -1.26);
+      deskPhone.position.set(0.10, DESK_TOP + 0.006, -1.26);
       this.group.add(deskPhone);
       const phoneScreen = new THREE.Mesh(new THREE.PlaneGeometry(0.063, 0.14), this._screenMaterial());
       phoneScreen.rotation.x = -Math.PI / 2;
-      phoneScreen.position.set(0.02, DESK_TOP + 0.011, -1.26);
+      phoneScreen.position.set(0.10, DESK_TOP + 0.011, -1.26);
       this.group.add(phoneScreen);
       this._deskPhone = [deskPhone, phoneScreen];
       this._deskScreen = this._screenOf(phoneScreen, 180, 400);
@@ -563,7 +563,7 @@
         new THREE.SphereGeometry(0.011, 12, 10),
         new THREE.MeshBasicMaterial({ color: 0xffb44d, toneMapped: false })
       );
-      badge.position.set(0.02, DESK_TOP + 0.045, -1.26);
+      badge.position.set(0.10, DESK_TOP + 0.045, -1.26);
       badge.visible = false;
       this.group.add(badge);
       this._deskBadge = badge;
@@ -714,6 +714,7 @@
         "leftFoot", "rightFoot",
         "leftUpperArm", "rightUpperArm",
         "leftLowerArm", "rightLowerArm",
+        "leftHand", "rightHand",
         "neck", "head", "hips", "chest",
       ];
       const base = {};
@@ -2287,12 +2288,16 @@
         for (let i = 0; i < chain.length; i++) solveBone(chain[i]);
       }
 
-      // 肘部朝下：绕"肩→腕"轴把肘转到最低点，手臂看起来才自然。
+      // 肘部朝下：绕"肩→掌心"轴把肘转到最低点。轴过掌心，所以掌心落点不会被转跑。
       scene.updateMatrixWorld(true);
       const shoulder = up.getWorldPosition(new THREE.Vector3());
       const wristPos = hand.getWorldPosition(new THREE.Vector3());
+      const handDir = new THREE.Vector3(0, 1, 0).applyQuaternion(
+        hand.getWorldQuaternion(new THREE.Quaternion())
+      );
+      const palmPos = wristPos.clone().addScaledVector(handDir, RM_PALM);
       const elbow = lo.getWorldPosition(new THREE.Vector3());
-      const axis = wristPos.clone().sub(shoulder);
+      const axis = palmPos.clone().sub(shoulder);
       if (axis.lengthSq() > 1e-6) {
         axis.normalize();
         const rad = elbow.clone().sub(shoulder);
@@ -2361,9 +2366,10 @@
       }
 
       if (type > 0.02 && this._mouseMesh) {
-        // 掌心平贴在鼠标顶面（不扭手腕）：鼠标球顶面约在原点上方 2cm，再留 8mm 手掌厚度。
+        // 掌心平贴在鼠标顶面（不扭手腕）：鼠标球顶面约在原点上方 2cm，
+        // 掌心落到顶面略下 2mm，手掌才真的压上去而不是悬着。
         this._mouseMesh.getWorldPosition(this._reachAim);
-        this._reachAim.y += 0.028;
+        this._reachAim.y += 0.018;
         this._reachArm("right", this._reachAim, type, false);
         return;
       }
@@ -2420,7 +2426,7 @@
       const walkElbow = 0.30 * Math.abs(swing);
 
       // 俯身：拿手机 / 打字 / 脱穿鞋时上身微微前倾，手才够得到桌面。
-      const lean = 0.27 * grab + 0.09 * type + 0.55 * shoe;
+      const lean = 0.27 * grab + 0.26 * type + 0.55 * shoe;
       const chest = h.getNormalizedBoneNode("chest");
       const chestBase = this._avatarBase && this._avatarBase.chest;
       if (chest && chestBase) {
@@ -2541,11 +2547,37 @@
         head.quaternion.copy(q);
       }
 
+      // 打字时把右手直接摆成"手背朝上、手指朝前"的握鼠标姿势（世界朝向），
+      // 否则手会跟着小臂的扭转方向斜着戳在鼠标边上。
+      if (type > 0.001) {
+        const handR = h.getNormalizedBoneNode("rightHand");
+        if (handR && handR.parent) {
+          this._avatar.scene.updateMatrixWorld(true);
+          const rootQ = this._avatar.scene.getWorldQuaternion(new THREE.Quaternion());
+          const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(rootQ);
+          fwd.y = 0;
+          if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, 1);
+          fwd.normalize();
+          const up = new THREE.Vector3(0, 1, 0);
+          const xAx = new THREE.Vector3().crossVectors(fwd, up).normalize();
+          const want = new THREE.Quaternion().setFromRotationMatrix(
+            new THREE.Matrix4().makeBasis(xAx, fwd, up)
+          );
+          // 手指略微下压 7°，像搭在鼠标背上。
+          want.multiply(
+            new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -0.12)
+          );
+          const parentQ = handR.parent.getWorldQuaternion(new THREE.Quaternion());
+          const localQ = parentQ.invert().multiply(want);
+          handR.quaternion.copy(handR.quaternion.clone().slerp(localQ, Math.min(1, type)));
+        }
+      }
+
       if (this._handPhone) {
         // 手机在桌面上时是桌面道具，拿到手里才显示手持模型。
         this._handPhone.visible = !!this._phoneHeld;
         if (this._handPhone.visible) this._updatePhonePose();
-        else if (this._handBone && this._handBaseQ) {
+        else if (this._handBone && this._handBaseQ && type < 0.001) {
           // 放下后手腕回正，否则会一直保持"看手机"的扭转角度。
           this._handBone.quaternion.copy(this._handBaseQ);
         }
@@ -2553,7 +2585,7 @@
 
       // 手指自然收拢：平时微屈，坐着更放松，握手机时只轻轻贴着手机背面
       //（握太紧指尖会翻到屏幕上，看起来就是"手穿过手机"）。
-      const curl = 0.10 + 0.06 * phone + 0.16 * grab + 0.26 * type + 0.12 * sit;
+      const curl = 0.10 + 0.06 * phone + 0.16 * grab + 0.10 * type + 0.12 * sit;
       if (this._fingerNodes) {
         const q = new THREE.Quaternion();
         this._fingerNodes.forEach((f) => {
@@ -2717,7 +2749,7 @@
       }
     }
 
-    /** 肖像视角跟随：镜头始终对准角色的头部，随站/坐/走/躺一起移动。 */
+    /** 肖像视角 = 第一人称：镜头放在她的眼睛位置，朝她面向的方向看。 */
     _followPortrait() {
       if (!this._avatar) return;
       const THREE = this.THREE;
@@ -2726,29 +2758,25 @@
       if (!head) return;
       const headPos = new THREE.Vector3();
       head.getWorldPosition(headPos);
+      const root = this._avatar.scene;
 
+      // 朝向跟随根节点（坐/站/走路/躺下都会带着转）。
+      const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(root.quaternion).normalize();
+      const flat = new THREE.Vector3(fwd.x, 0, fwd.z);
+      if (flat.lengthSq() < 1e-6) flat.set(0, 0, 1);
+      flat.normalize();
       if (this._lieT > 0.25) {
-        // 躺下时从床外侧斜上方看脸（避开靠墙的一侧）
-        this._targetPos.set(headPos.x + 0.02, headPos.y + 0.55, headPos.z - 0.95);
-        this._targetLook.copy(headPos);
-        this._targetFov = 30;
-        return;
+        // 躺下时第一人称是仰视：朝天花板偏一点，仍能看到房间。
+        fwd.copy(flat).multiplyScalar(0.45).add(new THREE.Vector3(0, 0.9, 0)).normalize();
+      } else {
+        fwd.copy(flat).add(new THREE.Vector3(0, -0.06, 0)).normalize();
       }
 
-      const root = this._avatar.scene;
-      const fwd = new THREE.Vector3(0, 0, 1).applyQuaternion(root.quaternion);
-      fwd.y = 0;
-      if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, 1);
-      fwd.normalize();
-      const right = new THREE.Vector3(fwd.z, 0, -fwd.x);
-      this._targetPos
-        .copy(headPos)
-        .addScaledVector(fwd, 1.18)
-        .addScaledVector(right, 0.16);
-      this._targetPos.y += 0.16;
-      this._targetLook.copy(headPos);
-      this._targetLook.y += 0.015;
-      this._targetFov = 26;
+      // 镜头退到脸前面 0.18m，避免近裁剪面把头发/鼻尖切进画面。
+      this._targetPos.copy(headPos).addScaledVector(fwd, 0.18);
+      this._targetPos.y += 0.03;
+      this._targetLook.copy(this._targetPos).addScaledVector(fwd, 2.0);
+      this._targetFov = 55;
     }
 
     setRoomVisible(visible) {
