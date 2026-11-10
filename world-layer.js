@@ -109,6 +109,9 @@
       this._drivesRoot = false; // 由世界层接管根节点（走路/躺下时）
       this._lieRoot = null; // 躺下时根节点位置（每次上床随机一点点）
       this._lieYaw = -Math.PI / 2; // 躺下时的最终朝向（可小幅随机）
+      this._obstacles = []; // 落地家具的占地矩形，走路绕开
+      this._path = null; // 当前走路的航点
+      this._pathGoal = null; // 当前航点对应的终点
 
       this._buildRoom();
       this._buildLights();
@@ -450,6 +453,7 @@
             }
           });
           this.group.add(obj);
+          this._addObstacle(name, obj);
         },
         undefined,
         (err) => console.warn("[world] load failed:", name, err)
@@ -1049,6 +1053,8 @@
       this._phase = "";
       this._drivesRoot = false;
       this._afterWalk = null;
+      this._path = null; // 停下来的旧航点作废，下次重新规划
+      this._pathGoal = null;
       // 强制收掉躺姿，否则切回坐/站时身体还带着躺下的旋转和高度补偿。
       this._lieT = 0;
       this._clearLieState();
@@ -1163,8 +1169,179 @@
         .multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2));
     }
 
+    /* ---------------- 走路避障 ---------------- */
+
+    /** 记录落地家具的占地矩形（只登记会挡路的几件，椅子和桌上的东西不算）。 */
+    _addObstacle(name, obj) {
+      const FLOOR = {
+        table_medium_long: 1,
+        bed_double_A: 1,
+        cabinet_medium_decorated: 1,
+        lamp_standing: 1,
+      };
+      if (!FLOOR[name]) return;
+      obj.updateMatrixWorld(true);
+      const b = new this.THREE.Box3().setFromObject(obj);
+      this._obstacles.push({ x0: b.min.x, x1: b.max.x, z0: b.min.z, z1: b.max.z });
+      this._path = null; // 家具位置变了，旧的航点作废
+      this._pathGoal = null;
+    }
+
+    /** 走路的可行走网格：0.12m 一格，家具按角色半径 0.26m 膨胀。 */
+    _walkGrid() {
+      const cell = 0.12;
+      const g = { x0: -2.84, z0: -2.36, cell: cell, nx: 47, nz: 39, blocked: null };
+      const R = 0.26;
+      const blocked = new Uint8Array(g.nx * g.nz);
+      for (let i = 0; i < g.nx; i++) {
+        const x = g.x0 + (i + 0.5) * cell;
+        for (let j = 0; j < g.nz; j++) {
+          const z = g.z0 + (j + 0.5) * cell;
+          for (let k = 0; k < this._obstacles.length; k++) {
+            const o = this._obstacles[k];
+            if (x > o.x0 - R && x < o.x1 + R && z > o.z0 - R && z < o.z1 + R) {
+              blocked[i * g.nz + j] = 1;
+              break;
+            }
+          }
+        }
+      }
+      g.blocked = blocked;
+      return g;
+    }
+
+    _cellAt(g, x, z) {
+      return [
+        Math.max(0, Math.min(g.nx - 1, Math.floor((x - g.x0) / g.cell))),
+        Math.max(0, Math.min(g.nz - 1, Math.floor((z - g.z0) / g.cell))),
+      ];
+    }
+
+    /** 两点之间是否走得通（沿途格子都不被占）。 */
+    _lineClear(g, ax, az, bx, bz) {
+      const n = Math.max(1, Math.ceil(Math.hypot(bx - ax, bz - az) / (g.cell * 0.5)));
+      for (let k = 1; k < n; k++) {
+        const t = k / n;
+        const c = this._cellAt(g, ax + (bx - ax) * t, az + (bz - az) * t);
+        if (g.blocked[c[0] * g.nz + c[1]]) return false;
+      }
+      return true;
+    }
+
+    /** 目标落在膨胀区内时，就近找个空格子当终点。 */
+    _freeNear(g, i, j) {
+      for (let r = 0; r <= 4; r++) {
+        for (let di = -r; di <= r; di++) {
+          for (let dj = -r; dj <= r; dj++) {
+            const ni = i + di;
+            const nj = j + dj;
+            if (ni < 0 || nj < 0 || ni >= g.nx || nj >= g.nz) continue;
+            if (!g.blocked[ni * g.nz + nj]) return [ni, nj];
+          }
+        }
+      }
+      return null;
+    }
+
+    /** 八方向 A*；房间小（47×39），线性取最小值就够快。 */
+    _astar(g, si, sj, ti, tj) {
+      const nz = g.nz;
+      const total = g.nx * nz;
+      const gScore = new Float32Array(total).fill(Infinity);
+      const came = new Int32Array(total).fill(-1);
+      const open = [si * nz + sj];
+      const start = open[0];
+      const goal = ti * nz + tj;
+      const h = (i, j) => Math.hypot(i - ti, j - tj);
+      gScore[start] = 0;
+      const closed = new Uint8Array(total);
+      const dirs = [
+        [1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
+        [1, 1, 1.414], [1, -1, 1.414], [-1, 1, 1.414], [-1, -1, 1.414],
+      ];
+      while (open.length) {
+        let bi = 0;
+        for (let k = 1; k < open.length; k++) {
+          const a = open[k];
+          const b = open[bi];
+          const fa = gScore[a] + h(Math.floor(a / nz), a % nz);
+          const fb = gScore[b] + h(Math.floor(b / nz), b % nz);
+          if (fa < fb) bi = k;
+        }
+        const cur = open.splice(bi, 1)[0];
+        if (cur === goal) break;
+        if (closed[cur]) continue;
+        closed[cur] = 1;
+        const ci = Math.floor(cur / nz);
+        const cj = cur % nz;
+        for (let d = 0; d < dirs.length; d++) {
+          const ni = ci + dirs[d][0];
+          const nj = cj + dirs[d][1];
+          if (ni < 0 || nj < 0 || ni >= g.nx || nj >= nz) continue;
+          const nid = ni * nz + nj;
+          if (g.blocked[nid] || closed[nid]) continue;
+          const ng = gScore[cur] + dirs[d][2];
+          if (ng < gScore[nid]) {
+            gScore[nid] = ng;
+            came[nid] = cur;
+            open.push(nid);
+          }
+        }
+      }
+      if (came[goal] === -1 && goal !== start) return null;
+      const cells = [];
+      for (let c = goal; c !== -1; c = came[c]) cells.push(c);
+      cells.reverse();
+      return cells;
+    }
+
+    /** 规划一条绕开家具的航点（含终点）；直走能到就只返回终点。 */
+    _planPath(sx, sz, tx, tz) {
+      if (!this._obstacles.length) return [[tx, tz]];
+      const g = this._walkGrid();
+      if (this._lineClear(g, sx, sz, tx, tz)) return [[tx, tz]];
+      const s = this._cellAt(g, sx, sz);
+      const t = this._cellAt(g, tx, tz);
+      const from = this._freeNear(g, s[0], s[1]);
+      const to = this._freeNear(g, t[0], t[1]);
+      if (!from || !to) return [[tx, tz]];
+      const cells = this._astar(g, from[0], from[1], to[0], to[1]);
+      if (!cells) return [[tx, tz]];
+      const pts = cells.map((c) => [
+        g.x0 + (Math.floor(c / g.nz) + 0.5) * g.cell,
+        g.z0 + ((c % g.nz) + 0.5) * g.cell,
+      ]);
+      pts.push([tx, tz]);
+      // 拉直：能一眼看到更远的航点，就跳过中间的格子点。
+      const out = [];
+      let cx = sx;
+      let cz = sz;
+      let i = 0;
+      while (i < pts.length) {
+        let far = i;
+        for (let k = pts.length - 1; k > i; k--) {
+          if (this._lineClear(g, cx, cz, pts[k][0], pts[k][1])) {
+            far = k;
+            break;
+          }
+        }
+        out.push(pts[far]);
+        cx = pts[far][0];
+        cz = pts[far][1];
+        i = far + 1;
+      }
+      return out;
+    }
+
     _enterWalk(x, z) {
-      this._walkTo.set(x, 0, z);
+      // 有些阶段每帧都会调这里：同一个终点不重复规划，否则航点会被重置。
+      if (!this._pathGoal || this._pathGoal[0] !== x || this._pathGoal[1] !== z) {
+        const root = this._avatar && this._avatar.scene ? this._avatar.scene.position : null;
+        this._pathGoal = [x, z];
+        this._path = root ? this._planPath(root.x, root.z, x, z) : [[x, z]];
+      }
+      const first = (this._path && this._path[0]) || [x, z];
+      this._walkTo.set(first[0], 0, first[1]);
       this._drivesRoot = true;
       this._walkAmp = 0;
       this._rootYaw = this._rootYaw || 0;
@@ -1181,7 +1358,14 @@
       const dx = this._walkTo.x - root.position.x;
       const dz = this._walkTo.z - root.position.z;
       const dist = Math.hypot(dx, dz);
-      if (dist < 0.02) {
+      const last = !this._path || this._path.length <= 1;
+      if (dist < (last ? 0.02 : 0.10)) {
+        // 到中途航点就转向下一个，只有到终点才算走完。
+        if (!last) {
+          this._path.shift();
+          this._walkTo.set(this._path[0][0], 0, this._path[0][1]);
+          return false;
+        }
         this._walkAmp = Math.max(0, this._walkAmp - dt * 2);
         return true;
       }
