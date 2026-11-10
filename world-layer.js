@@ -171,6 +171,17 @@
       this._box(0.12, 3, 5, wallMat, -3, 1.5, 0);
       this._box(0.12, 3, 5, wallMat, 3, 1.5, 0);
 
+      // 房间只砌三面墙，正面敞开留给相机看进来。第一人称站在屋里朝 +Z 看时
+      // 会直接看到场景外的一片空白，所以补一面只朝内的背景墙面：
+      // 法线朝屋里，从外面的房间视角看是背面、会被剔除，不影响原来的敞口效果。
+      const backdrop = new THREE.Mesh(
+        new THREE.PlaneGeometry(6, 3),
+        this._mat(0xe4d8cb)
+      );
+      backdrop.position.set(0, 1.5, 2.5);
+      backdrop.rotation.y = Math.PI;
+      this.group.add(backdrop);
+
       // 窗框。
       const frameMat = this._mat(0xf7f3ee);
       this._box(1.36, 0.07, 0.06, frameMat, -2.21, 2.4, -2.41);
@@ -351,6 +362,7 @@
     _buildLights() {
       const THREE = this.THREE;
       const amb = new THREE.AmbientLight(0xffffff, this._isNight ? 0.22 : 0.55);
+      this._ambient = amb;
       this.group.add(amb);
 
       const sun = new THREE.DirectionalLight(
@@ -369,7 +381,10 @@
       this._lampLight.position.set(-2.55, 1.45, 0.55);
       this.group.add(this._lampLight);
 
-      this._screenLight = new THREE.PointLight(0x8fc7ff, this._isNight ? 1.1 : 0.45, 3, 2);
+      // 屏幕补光只做氛围：离桌面太近，物理衰减会把键盘和桌面照到过曝，
+      // 所以用很小的强度 + decay=1，蓝色光晕还在，但不会再糊成一片白。
+      this._screenLightBase = this._isNight ? 0.38 : 0.28;
+      this._screenLight = new THREE.PointLight(0x8fc7ff, this._screenLightBase, 4, 1);
       this._screenLight.position.set(-0.25, 1.15, -1.38);
       this.group.add(this._screenLight);
     }
@@ -506,26 +521,34 @@
       this._place("book_set", 0.32, "x", [0.22, DESK_TOP, -1.46], 0.35);
       // 墙上画框。
       this._place("pictureframe_large_A", 0.62, "x", [0.52, 1.55, -2.42], 0);
+      // 正面背景墙也挂两幅画：第一人称坐/站时正对这面墙，空墙看着像没渲染出来。
+      this._place("pictureframe_large_A", 0.66, "x", [-0.62, 1.55, 2.40], Math.PI);
+      this._place("pictureframe_large_A", 0.42, "x", [0.34, 1.66, 2.40], Math.PI);
 
       // 显示器（程序化）：屏幕朝向 +Z（面向角色和相机）。
       const bodyMat = this._mat(0x2a2f3a);
-      const screenMat = new THREE.MeshStandardMaterial({
-        color: 0x9fd3ff,
-        emissive: 0x7fb8ff,
-        emissiveIntensity: this._isNight ? 0.9 : 1.25,
-        roughness: 0.35,
-      });
+      // 屏幕用不受光照影响的贴图材质：桌面蓝光点光源离屏幕只有十几厘米，
+      // 标准材质会被它照成一整块纯白；纯色亮蓝在贴脸的第一人称里同样是一整块
+      // 发白的亮板，所以画一张深色界面贴上去，亮度靠 texture × color 控制。
+      const screenMat = this._screenMaterial();
+      this._screenTint = screenMat.color.clone();
       this._box(0.66, 0.40, 0.04, bodyMat, -0.30, DESK_TOP + 0.45, -1.50);
       const screen = new THREE.Mesh(new THREE.PlaneGeometry(0.60, 0.34), screenMat);
       screen.position.set(-0.30, DESK_TOP + 0.45, -1.475);
       this.group.add(screen);
       this._screenMat = screenMat;
-      this._screenBase = screenMat.emissiveIntensity;
+      this._screenBase = 1;
+      this._drawDesktopScreen(this._screenOf(screen, 512, 288));
       this._box(0.06, 0.22, 0.06, bodyMat, -0.30, DESK_TOP + 0.20, -1.50);
       this._box(0.24, 0.02, 0.14, bodyMat, -0.30, DESK_TOP + 0.09, -1.50);
 
-      // 键盘与杯子。
-      this._box(0.44, 0.018, 0.15, this._mat(0xd9dde5), -0.40, DESK_TOP + 0.02, -1.08);
+      // 键盘与杯子。键盘贴一张键帽贴图：第一人称低头时能看出是键盘，
+      // 而不是一块被灯照到发白的长方形。
+      this._box(
+        0.44, 0.018, 0.15,
+        new THREE.MeshStandardMaterial({ map: this._keyboardTexture(), roughness: 0.8, metalness: 0 }),
+        -0.40, DESK_TOP + 0.02, -1.08
+      );
       const mug = new THREE.Mesh(
         new THREE.CylinderGeometry(0.045, 0.04, 0.10, 16),
         this._mat(0xe8e2d8)
@@ -567,6 +590,76 @@
       badge.visible = false;
       this.group.add(badge);
       this._deskBadge = badge;
+    }
+
+    /** 电脑桌面画面：深色编辑器界面，避免整块屏幕在贴脸视角下发白。 */
+    _drawDesktopScreen(scr) {
+      if (!scr) return;
+      const g = scr.ctx;
+      const W = scr.w;
+      const H = scr.h;
+      const bg = g.createLinearGradient(0, 0, W, H);
+      bg.addColorStop(0, "#14243a");
+      bg.addColorStop(0.6, "#0d1726");
+      bg.addColorStop(1, "#0a1220");
+      g.fillStyle = bg;
+      g.fillRect(0, 0, W, H);
+      // 顶部菜单栏。
+      g.fillStyle = "rgba(120,170,230,0.14)";
+      g.fillRect(0, 0, W, H * 0.05);
+      // 左侧文件树。
+      g.fillStyle = "rgba(6,12,22,0.85)";
+      g.fillRect(0, H * 0.05, W * 0.20, H * 0.95);
+      for (let i = 0; i < 10; i++) {
+        g.fillStyle = i === 2 ? "rgba(110,190,255,0.34)" : "rgba(140,170,210,0.20)";
+        g.fillRect(W * 0.028, H * 0.085 + i * H * 0.032, W * (0.08 + (i % 3) * 0.025), H * 0.013);
+      }
+      // 代码行。
+      const colors = ["#6cb6ff", "#9cdcfe", "#c8d6e5", "#e2b56b", "#8fbf8f", "#b392d6"];
+      for (let i = 0; i < 18; i++) {
+        const y = H * 0.085 + i * H * 0.045;
+        let x = W * 0.235;
+        const n = 2 + ((i * 7) % 3);
+        for (let k = 0; k < n; k++) {
+          const w = W * (0.05 + (((i * 13 + k * 29) % 17) / 100) * 1.9);
+          g.globalAlpha = 0.5;
+          g.fillStyle = colors[(i + k) % colors.length];
+          g.fillRect(x, y, w, H * 0.015);
+          x += w + W * 0.022;
+        }
+      }
+      g.globalAlpha = 1;
+      // 底部状态栏。
+      g.fillStyle = "rgba(90,150,220,0.22)";
+      g.fillRect(0, H * 0.96, W, H * 0.04);
+      scr.tex.needsUpdate = true;
+    }
+
+    /** 键盘贴图：一排排键帽，低头视角里能看出是键盘。 */
+    _keyboardTexture() {
+      const THREE = this.THREE;
+      const c = document.createElement("canvas");
+      c.width = 440;
+      c.height = 150;
+      const g = c.getContext("2d");
+      g.fillStyle = "#7d8798";
+      g.fillRect(0, 0, 440, 150);
+      const cols = 15;
+      const rows = 5;
+      const gap = 4;
+      const cw = (440 - gap * (cols + 1)) / cols;
+      const ch = (150 - gap * (rows + 1)) / rows;
+      g.fillStyle = "#b7c0ce";
+      for (let r = 0; r < rows; r++) {
+        for (let i = 0; i < cols; i++) {
+          g.fillRect(gap + i * (cw + gap), gap + r * (ch + gap), cw, ch);
+        }
+      }
+      // 空格键：盖住最后一排中间几颗键。
+      g.fillRect(gap + 4 * (cw + gap), gap + 4 * (ch + gap), cw * 7 + gap * 6, ch);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
     }
 
     /** 屏幕材质：用 canvas 贴图，能显示文字（手机消息 / 电脑任务）。 */
@@ -677,6 +770,7 @@
       }
 
       this._avatar = vrm;
+      root.visible = this._preset !== "portrait";
       this._captureBasePose(vrm);
       this._captureFingerPose(vrm);
       this._applyRelaxedArms();
@@ -989,6 +1083,7 @@
       this._actionT = 0;
       this._sleepT = 0;
       this._afterWalk = null;
+      this._chairReturn = false;
       // 切到别的动作时把窗关好、头收回来，窗扇不会一直敞着。
       if (n !== "window") {
         this._lookOut = 0;
@@ -1020,6 +1115,17 @@
         this._action = "wake";
         this._phase = "walk-back";
         this._enterWalk(AVATAR_POS[0], AVATAR_POS[2]);
+        return true;
+      }
+      // 手里还拿着手机时被叫去做别的动作：先把手机放回桌面，再执行新动作，
+      // 否则手机会一直握在手里（去电脑打字、上床睡觉都带着它）。
+      if (this._phoneHeld && n !== "phone" && n !== "message") {
+        this._pendingAction = n;
+        this._action = "phone";
+        this._phase = "p-putaway";
+        this._actionT = 0;
+        this._msgText = "";
+        this._msgShown = 0;
         return true;
       }
       if (n === "sleep") {
@@ -1112,6 +1218,7 @@
       this._lieRoot = null;
       // 手机 / 消息状态收干净：手机回到桌上，提示点熄灭。
       if (this._phoneHeld) this._transferPhone(false);
+      this._pendingAction = null;
       this._msgNotifyT = 0;
       this._msgShown = 0;
       this._msgReplied = false;
@@ -1145,6 +1252,8 @@
       this._sitting = true;
       this._action = "sit";
       this._phase = "";
+      // 椅子若被电脑动作转去桌面了，坐回去后自动转正。
+      this._chairReturn = Math.abs(this._chairAngle) > 0.05;
     }
 
     /**
@@ -1528,6 +1637,18 @@
         }
       } else {
         this._stretchT = ease(this._stretchT, 0, 3, dt);
+      }
+
+      // 玩电脑中途被打断（去睡觉 / 看风景 / 走动）时转椅还朝桌面，
+      // 回到坐姿后把它慢慢转回来，否则她会一直背对房间坐着。
+      if ((a === "sit" || a === "stand") && this._chairReturn) {
+        this._chairAngle += (0 - this._chairAngle) * Math.min(1, dt * 3);
+        if (this._chair) this._chair.rotation.y = this._chairAngle;
+        if (Math.abs(this._chairAngle) < 0.01) {
+          this._chairAngle = 0;
+          if (this._chair) this._chair.rotation.y = 0;
+          this._chairReturn = false;
+        }
       }
 
       if (a === "walk") {
@@ -1980,6 +2101,16 @@
         }
         return;
       }
+      if (p === "p-putaway") {
+        // 别人叫她做事时手机还在手上：先把拿着手机的手放下来，再转身放回桌面。
+        this._phoneT = ease(this._phoneT, 0, 4.5, dt);
+        this._tapT = 0;
+        if (this._actionT > 0.9) {
+          this._phase = "p-desk2";
+          this._actionT = 0;
+        }
+        return;
+      }
       if (p === "p-desk2") {
         if (this._turnChairTo(Math.PI, dt, 4.2)) {
           this._phase = "p-place";
@@ -2008,7 +2139,10 @@
         this._phoneGrab = ease(this._phoneGrab, 0, 3, dt);
         if (this._turnChairTo(0, dt, 4.2) && this._actionT > 1.2) {
           this._phoneGrab = 0;
-          this._backToSit();
+          const next = this._pendingAction;
+          this._pendingAction = null;
+          if (next) this.startAction(next);
+          else this._backToSit();
         }
       }
     }
@@ -2018,12 +2152,13 @@
       const p = this._phase;
       const glow = (on) => {
         if (this._screenMat) {
-          const base = this._screenBase == null ? 1 : this._screenBase;
-          const flicker = on ? 0.12 * Math.sin(this._time * 7.3) : 0;
-          this._screenMat.emissiveIntensity = base * (on ? 1.35 : 1) + flicker;
+          const flicker = on ? 0.05 * Math.sin(this._time * 7.3) : 0;
+          this._screenMat.color
+            .copy(this._screenTint)
+            .multiplyScalar((on ? 1.12 : 1) + flicker);
         }
         if (this._screenLight) {
-          this._screenLight.intensity = (this._isNight ? 1.1 : 0.45) * (on ? 1.5 : 1);
+          this._screenLight.intensity = this._screenLightBase * (on ? 1.3 : 1);
         }
       };
       if (p === "c-turn") {
@@ -2699,6 +2834,7 @@
         if (e.button !== 0 || !this._canDragChair() || !this._pickChair(e)) return;
         this._dragging = true;
         this._dragX = e.clientX;
+        this._chairReturn = false; // 手动转椅子时不再自动转正
         canvas.style.cursor = "grabbing";
         if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
         e.preventDefault();
@@ -2734,6 +2870,14 @@
     setPreset(name, immediate) {
       const preset = PRESETS[name] || PRESETS.desk;
       this._preset = name;
+      // 第一人称视角不显示自己：镜头就在她眼睛的位置，留着模型只会看到
+      // 头骨/头发的内壁（走路、转身时尤其明显）。
+      if (this._avatar) this._avatar.scene.visible = name !== "portrait";
+      // 夜里的房间只有台灯和屏幕在发光，第一人称贴墙时几乎全黑：
+      // 肖像模式补一点环境光，其他机位保持原来的夜色。
+      if (this._ambient) {
+        this._ambient.intensity = this._isNight ? (name === "portrait" ? 0.5 : 0.22) : 0.55;
+      }
       this._targetPos.fromArray(preset.pos);
       this._targetLook.fromArray(preset.look);
       this._targetFov = preset.fov || 30;
@@ -2765,18 +2909,24 @@
       const flat = new THREE.Vector3(fwd.x, 0, fwd.z);
       if (flat.lengthSq() < 1e-6) flat.set(0, 0, 1);
       flat.normalize();
+
+      const typing = Math.min(1, Math.max(0, this._typeT || 0));
+      const view = flat.clone();
       if (this._lieT > 0.25) {
         // 躺下时第一人称是仰视：朝天花板偏一点，仍能看到房间。
-        fwd.copy(flat).multiplyScalar(0.45).add(new THREE.Vector3(0, 0.9, 0)).normalize();
+        view.copy(flat).multiplyScalar(0.45).add(new THREE.Vector3(0, 0.9, 0)).normalize();
       } else {
-        fwd.copy(flat).add(new THREE.Vector3(0, -0.06, 0)).normalize();
+        // 打字时视线往下压、视野放宽：屏幕在正前方，键盘在桌面下方约 45°～55°，
+        // 直视只能看到屏幕，键盘永远进不了画面。
+        const pitch = THREE.MathUtils.degToRad(-6 - 14 * typing);
+        view.multiplyScalar(Math.cos(pitch)).add(new THREE.Vector3(0, Math.sin(pitch), 0));
       }
 
-      // 镜头退到脸前面 0.18m，避免近裁剪面把头发/鼻尖切进画面。
-      this._targetPos.copy(headPos).addScaledVector(fwd, 0.18);
+      // 镜头放在眼睛位置（肖像视角已隐藏模型，不用往前挪来躲头发）。
+      this._targetPos.copy(headPos).addScaledVector(flat, 0.05);
       this._targetPos.y += 0.03;
-      this._targetLook.copy(this._targetPos).addScaledVector(fwd, 2.0);
-      this._targetFov = 55;
+      this._targetLook.copy(this._targetPos).addScaledVector(view, 2.0);
+      this._targetFov = 55 + 19 * typing;
     }
 
     setRoomVisible(visible) {
@@ -2797,10 +2947,12 @@
         const typing = (this._typeT || 0) > 0.05;
         this._screenSleepT = ease(this._screenSleepT || 0, typing ? 0 : 1, 1.5, dt);
         if (!typing) {
-          const lit = 1 - 0.94 * this._screenSleepT;
-          this._screenMat.emissiveIntensity = this._screenBase * lit;
+          const lit = 1 - 0.9 * this._screenSleepT;
+          this._screenMat.color
+            .copy(this._screenTint)
+            .multiplyScalar(lit);
           if (this._screenLight) {
-            this._screenLight.intensity = (this._isNight ? 1.1 : 0.45) * lit;
+            this._screenLight.intensity = this._screenLightBase * lit;
           }
         }
       }
